@@ -1,0 +1,163 @@
+import numpy as np
+import pandas as pd
+import torch
+from ..model import do_conv, _prep_dict, kernel
+from scipy.spatial import cKDTree
+
+def get_whisper_edges(Z_1, Z_2, x_a, x_b, device):
+    agg_Z_2_x_b = do_conv(Z_2 * x_b, kernel=kernel.to(device))
+    X = (Z_1 * x_a) * agg_Z_2_x_b
+    return X
+
+def expression_profile(adata, mode = "cell_type", threshold = None):
+    array_usr = adata.uns["binned_data"]
+    genes = adata.uns['genes']
+
+    if mode == "cell_type":
+        if 'cell_type' not in adata.obs:
+            raise ValueError("adata.obs must contain 'cell_type' column for mode 'cell_type'")
+        cell_types = adata.obs['cell_type'].values
+        unique_types = np.unique(adata.obs['cell_type'].values)
+    elif mode == "region":
+        if 'region' not in adata.obs:
+            raise ValueError("adata.obs must contain 'region' column for mode 'region'")
+        cell_types = adata.obs['region'].values
+        unique_types = np.unique(adata.obs['region'].values)
+    elif mode =="cell_type_region":
+        if 'cell_type' not in adata.obs or 'region' not in adata.obs:
+            raise ValueError("adata.obs must contain both 'cell_type' and 'region' columns for mode 'cell_type_region'")
+        cell_types = (adata.obs['cell_type'].astype(str) + "_" + adata.obs['region'].astype(str)).values
+        unique_types = np.unique(adata.obs['cell_type'].astype(str) + "_" + adata.obs['region'].astype(str))
+    else:
+        raise ValueError("Mode must be one of 'cell_type', 'region', or 'cell_type_region'")
+    
+    coords = []
+    for key in ['presynapse', 'postsynapse']:
+        target_coords_xy = np.argwhere(adata.uns[f"{key}_map"] == 1)
+        inverted_dict = {t: [] for t in unique_types}
+        knn_idx = adata.uns[f"{key}_knn_idx"]
+        for i, bins in enumerate(knn_idx):
+            closest_types = cell_types[bins]
+            for t in closest_types:
+                inverted_dict[t].append(tuple(target_coords_xy[i]))
+        coords.append(inverted_dict)
+    def profile_dict(coord_dict):
+        result = {}
+        for t, v in coord_dict.items():
+            if len(v) == 0:
+                continue
+            rows, cols = zip(*v)  # separate row and col
+            rows = np.array(rows)
+            cols = np.array(cols)
+            # Flatten first two dimensions using tuple indexing
+            values = array_usr[rows, cols, :]  # shape (len(v), n_genes)
+            # result[t] = values.mean(axis=0)
+            binary = (values > 0).astype(float)
+            result[t] = binary.mean(axis=0)
+        return result
+    a_dict = profile_dict(coords[0])
+    d_dict = profile_dict(coords[1])
+
+    a_df = pd.DataFrame.from_dict(a_dict, orient="index", columns=genes)
+    d_df = pd.DataFrame.from_dict(d_dict, orient="index", columns=genes)
+
+    s_df = (a_df + d_df).loc[:, lambda df: df.sum() != 0]
+    # a_df[a_df < threshold] = 0
+    # d_df[d_df < threshold] = 0
+    # s_df[s_df < threshold] = 0
+
+    combined = list(set(adata.uns['axon_markers']).union(adata.uns['dendrite_markers']))
+    s_df = s_df.drop(columns=combined, errors="ignore")
+    a_df = a_df.drop(columns=combined, errors="ignore")
+    d_df = d_df.drop(columns=combined, errors="ignore")
+    a_df = a_df.loc[:, a_df.sum() != 0]
+    d_df = d_df.loc[:, d_df.sum() != 0]
+    s_df = s_df.loc[:, s_df.sum() != 0]
+
+    adata.uns[f"presynapse_{mode}_profile"] = a_df.T
+    adata.uns[f"postsynapse_{mode}_profile"] = d_df.T
+    adata.uns[f"synapse_{mode}_profile"] = s_df.T
+    return adata
+
+def communication_profile(adata, mode = "cell_type", k = 1, threshold = None, device = 'cpu'):
+    if mode == "cell_type":
+        if 'cell_type' not in adata.obs:
+            raise ValueError("adata.obs must contain 'cell_type' column for mode 'cell_type'")
+        cell_types = adata.obs['cell_type'].values
+        unique_types = np.unique(adata.obs['cell_type'].values)
+    elif mode == "region":
+        if 'region' not in adata.obs:
+            raise ValueError("adata.obs must contain 'region' column for mode 'region'")
+        cell_types = adata.obs['region'].values
+        unique_types = np.unique(adata.obs['region'].values)
+    elif mode =="cell_type_region":
+        if 'cell_type' not in adata.obs or 'region' not in adata.obs:
+            raise ValueError("adata.obs must contain both 'cell_type' and 'region' columns for mode 'cell_type_region'")
+        cell_types = (adata.obs['cell_type'].astype(str) + "_" + adata.obs['region'].astype(str)).values
+        unique_types = np.unique(adata.obs['cell_type'].astype(str) + "_" + adata.obs['region'].astype(str))
+    else:
+        raise ValueError("Mode must be one of 'cell_type', 'region', or 'cell_type_region'")
+    array_usr = (adata.uns['binned_data'] * adata.uns["mask_ecm"][:, :, None]).copy()
+    genes = list(adata.uns['genes'])
+    # # remove later
+    # with open("../SCOUBI/scoubi/data/pairs.pkl", "rb") as fp:
+    #     pairs = pickle.load(fp)
+    # pairs = [pair for pair in pairs if pair[0] in genes and pair[1] in genes]
+    # #--------------
+    pairs = adata.uns['lr_pairs'] 
+    genes = adata.uns['genes'].tolist()
+    ad_map = torch.from_numpy(adata.uns['bin_probabilities'].copy()).float().to(device)
+    binary_matrix_ecm = torch.from_numpy(adata.uns['mask_ecm'].copy()).float().to(device)
+    binary_matrix_cell = torch.from_numpy(adata.uns['mask_cell'].copy()).float().to(device)
+    binary_overlap = (binary_matrix_cell * binary_matrix_ecm).cpu().numpy()
+    x_bin, x_shape, gene_to_idx = _prep_dict(array_usr, pairs, genes, device)
+    threshold = threshold if threshold is not None else 0.5
+    ad_map[ad_map <= threshold] = 0
+    ad_map[ad_map > threshold] = 1
+    significant_lr_pairs = adata.uns['cellwhisper_lr']
+    lr_edges = {}
+    lr_edges_end = {}
+    for gp in significant_lr_pairs:
+        a_idx, b_idx = gene_to_idx.get(gp[0]), gene_to_idx.get(gp[1])
+        if a_idx is None or b_idx is None or a_idx not in x_bin or b_idx not in x_bin: continue
+        x_a, x_b = x_bin[a_idx], x_bin[b_idx]
+        X = get_whisper_edges(ad_map[:, 0].reshape(binary_matrix_ecm.shape), ad_map[:, 1].reshape(binary_matrix_ecm.shape), x_a, x_b, device)
+        X[X > 0] = 1
+        lr_edges[tuple(gp)] = X.cpu().numpy()
+        X = get_whisper_edges(ad_map[:, 1].reshape(binary_matrix_ecm.shape), ad_map[:, 0].reshape(binary_matrix_ecm.shape), x_b, x_a, device)
+        X[X > 0] = 1
+        lr_edges_end[tuple(gp)] = X.cpu().numpy()
+    edges = {}
+    for lr, mat_start in lr_edges.items():
+        mat_end = lr_edges_end.get(lr, [])
+        starts = np.argwhere(mat_start == 1)
+        ends = np.argwhere(mat_end == 1)
+        edges_lr = set()
+        for start in starts:
+            linked_ends = [end for end in ends if max(abs(end[0]-start[0]), abs(end[1]-start[1])) == 1]
+            for end in linked_ends:
+                edge = tuple(sorted([tuple(start), tuple(end)]))
+                edges_lr.add(edge)
+        edges["_".join(lr)] = list(edges_lr)
+
+    count_table = pd.DataFrame(0, index=unique_types, columns=["_".join(x) for x in significant_lr_pairs])
+    tree = cKDTree(adata.obsm['bin'])
+
+    for lr, edge_list in edges.items():
+        all_centers = []
+        for edge in edge_list:
+            p1, p2 = np.array(edge[0]), np.array(edge[1])
+            center = (p1 + p2) / 2.0
+            all_centers.append(center)
+        dists, idxs = tree.query(all_centers, k=k)
+        if k == 1:
+            dists = dists[:, np.newaxis]
+            idxs = idxs[:, np.newaxis]
+        closest_types = cell_types[idxs].ravel()
+        counts = pd.Series(closest_types).value_counts()
+        counts = counts.reindex(count_table.index, fill_value=0)
+        count_table[lr] = count_table[lr].add(counts)
+
+    adata.uns['lr_edges'] = edges
+    adata.uns[f'communication_{mode}_profile'] = count_table
+    return adata
