@@ -151,11 +151,6 @@ def overview(
     """
     array_usr = (adata.uns['binned_data'].toarray().reshape(adata.uns['binned_data_shape']) * adata.uns["mask_ecm"][:, :, None]).copy()
     genes = list(adata.uns['genes'])
-    # # remove later
-    # with open("../SCOUBI/scoubi/data/pairs.pkl", "rb") as fp:
-    #     pairs = pickle.load(fp)
-    # pairs = [pair for pair in pairs if pair[0] in genes and pair[1] in genes]
-    # #--------------
     pairs = adata.uns['lr_pairs']
     genes = adata.uns['genes']
     ad_map = torch.from_numpy(adata.uns['bin_probabilities'].copy()).float().to(device)
@@ -164,7 +159,6 @@ def overview(
     binary_overlap = (binary_matrix_cell * binary_matrix_ecm).cpu().numpy()
     x_bin, x_shape, gene_to_idx = _prep_dict(array_usr, pairs, genes, device)
     threshold = threshold if threshold is not None else 0.5
-    # adata.uns['threshold'] = threshold
     ad_map[ad_map <= threshold] = 0
     ad_map[ad_map > threshold] = 1
     rows = []
