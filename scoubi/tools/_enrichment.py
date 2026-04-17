@@ -10,6 +10,8 @@ import scanpy as sc
 from ..model import get_zscore, do_conv, _prep_dict, kernel
 import pickle
 from ..plotting import size_mapping, categorize_gene
+from statsmodels.stats.proportion import proportions_ztest
+from statsmodels.stats.multitest import multipletests
 
 datasets = {"BP": "GO:0008150", "CC": "GO:0005575", "MF": "GO:0003674"}
 
@@ -48,10 +50,10 @@ def get_panther(geneset, background, organism = 10090):
         for i in x.json()['results']['result']:
             if i['number_in_list'] > 0:
                 try:
-                    rows.append([i['number_in_list'], i['fold_enrichment'], i['fdr'], i['expected'], 
+                    rows.append([i['number_in_list'], i['fold_enrichment'], i['fdr'], i['expected'],
                             i['number_in_reference'], i['pValue'], i['term']['label'], i['term']['id']])
                 except:
-                    rows.append([i['number_in_list'], i['fold_enrichment'], i['fdr'], i['expected'], 
+                    rows.append([i['number_in_list'], i['fold_enrichment'], i['fdr'], i['expected'],
                             i['number_in_reference'], i['pValue'], i['term']['label'], np.nan])
         df_ds = pd.DataFrame(rows, columns = ['number_in_list', 'fold_enrichment', 'fdr', 'expected', 'number_in_reference', 'pValue', 'term', 'id'])
         df_significant = df_ds[(df_ds.pValue < 0.05) & (df_ds.fold_enrichment > 1)].sort_values(by=['pValue'])
@@ -64,72 +66,231 @@ def get_panther(geneset, background, organism = 10090):
     df['id'] = df['id'].astype('str')
     return df
 
-def compare(adata: ad.AnnData, mode = "n_vs_s", threshold = None, lfc_cap = 50, device = 'cpu'):
-    array_usr = (adata.uns['binned_data'] * adata.uns["mask_ecm"][:, :, None]).copy()
-    genes = list(adata.uns['genes'])
-    # pairs = adata.uns['pairs']
-    genes = adata.uns['genes'].tolist()
-    adata.uns['axon_markers'] = axon_markers
-    adata.uns['dendrite_markers'] = dendrite_markers
-    axon_markers = [gene for gene in axon_markers if gene in genes]
-    dendrite_markers = [gene for gene in dendrite_markers if gene in genes]
-    threshold = threshold if threshold is not None else 0.5
-    a_map = adata.uns['axon_map']
-    d_map = adata.uns['dendrite_map']
-    mask = (a_map + d_map) == 1
-    adata_ad = ad.AnnData(array_usr[mask])
-    adata_ad.var_names = genes
-    if mode == "a_vs_d":
-        axonic_flags = a_map[mask]
-        labels = np.where(axonic_flags == 1, 'axonic', 'dendritic')
-        adata_ad.obs['a/d'] = pd.Categorical(labels)
-        sc.pp.normalize_total(adata_ad, target_sum=1e4)
-        sc.tl.rank_genes_groups(adata_ad, groupby='a/d', method='wilcoxon')
-        de_df = sc.get.rank_genes_groups_df(adata_ad, group = "axonic")
-        de_df = de_df[(~de_df.names.isin(axon_markers)) & (~de_df.names.isin(dendrite_markers))]
-        de_df['-log10(FDR)'] = -np.log10(de_df['pvals_adj'].fillna(1.0)+ 1e-300)
-        de_df['logfoldchanges'] = de_df['logfoldchanges'].clip(-lfc_cap, lfc_cap)
-        adata.uns["a_vs_d"] = de_df
-    elif mode == "n_vs_s":
-        exp_cell = np.asarray(adata.X.sum(axis=0)).ravel()
-        exp_neurites = np.asarray(adata_ad.X.sum(axis=0)).ravel()
-        df_exp = pd.DataFrame({'Soma': exp_cell, "Neurites": exp_neurites})
-        df_exp['ratio'] = (df_exp['Neurites'] + 1) / (df_exp['Soma'] + 1)   
-        df_exp.sort_values(by="ratio", ascending=False, inplace=True)
-        adata.uns["n_vs_s"] = df_exp
-    elif mode == "pre_vs_post":
-        presynapse_map = adata.uns['presynapse_map']
-        postsynapse_map = adata.uns['postsynapse_map']
-        mask = (presynapse_map + postsynapse_map) == 1
-        adata_pp = ad.AnnData(array_usr[mask])
-        adata_pp.var_names = genes
-        presyn_flags = presynapse_map[mask]
-        labels = np.where(presyn_flags == 1, 'presynaptic', 'postsynaptic')
-        adata_pp.obs['pre/post'] = pd.Categorical(labels)
-        sc.pp.normalize_total(adata_pp, target_sum=1e4)
-        sc.tl.rank_genes_groups(adata_pp, groupby='pre/post', method='wilcoxon')
-        de_df = sc.get.rank_genes_groups_df(adata_pp, group = "presynaptic")
-        de_df = de_df[(~de_df.names.isin(axon_markers)) & (~de_df.names.isin(dendrite_markers))]
-        de_df['-log10(FDR)'] = -np.log10(de_df['pvals_adj'].fillna(1.0)+ 1e-300)
-        de_df['logfoldchanges'] = de_df['logfoldchanges'].clip(-lfc_cap, lfc_cap)
-        adata.uns["pre_vs_post"] = de_df
-    else:
-        raise ValueError("Mode should be either 'a_vs_d' or 'n_vs_s'")
-    return adata
+# def compare(adata: ad.AnnData, mode = "n_vs_s", method = "wilcoxon", threshold = None, lfc_cap = 50, remove_markers = False):
+#     array_usr = (adata.uns['binned_data'].toarray().reshape(adata.uns['binned_data_shape']) * adata.uns["mask_ecm"][:, :, None]).copy()
+#     genes = list(adata.uns['genes'])
+#     axon_markers = adata.uns['axon_markers']
+#     dendrite_markers = adata.uns['dendrite_markers']
+#     axon_markers = [gene for gene in axon_markers if gene in genes]
+#     dendrite_markers = [gene for gene in dendrite_markers if gene in genes]
+#     threshold = threshold if threshold is not None else 0.5
+#     a_map = adata.uns['axon_map'].copy()
+#     d_map = adata.uns['dendrite_map'].copy()
+#     mask = (a_map + d_map) == 1
+#     adata_ad = ad.AnnData(array_usr[mask])
+#     adata_ad.var_names = genes
+#     if method == "wilcoxon":
+#         if 'wilcoxon' not in adata.uns:
+#             adata.uns['wilcoxon'] = {}
+#         if mode == "a_vs_d":
+#             axonic_flags = a_map[mask]
+#             labels = np.where(axonic_flags == 1, 'axonic', 'dendritic')
+#             adata_ad.obs['a/d'] = pd.Categorical(labels)
+#             sc.pp.normalize_total(adata_ad, target_sum=1e4)
+#             sc.tl.rank_genes_groups(adata_ad, groupby='a/d', method='wilcoxon')
+#             de_df = sc.get.rank_genes_groups_df(adata_ad, group = "axonic")
+#             de_df['is_marker'] = de_df['names'].isin(axon_markers + dendrite_markers)
+#             if remove_markers:
+#                 de_df = de_df[~de_df['is_marker']]
+#             de_df['-log10(FDR)'] = -np.log10(de_df['pvals_adj'].fillna(1.0)+ 1e-300)
+#             de_df['logfoldchanges'] = de_df['logfoldchanges'].clip(-lfc_cap, lfc_cap)
+#             adata.uns["wilcoxon"]["a_vs_d"] = de_df
+#         elif mode == "pre_vs_post":
+#             interface_map = adata.uns['interface_map']
+#             axon_map = adata.uns['axon_map']
+#             mask = interface_map == 1
+#             adata_pp = ad.AnnData(array_usr[mask])
+#             adata_pp.var_names = genes
+#             axon_flags = (interface_map * axon_map)[mask]
+#             labels = np.where(axon_flags == 1, 'axonic', 'dendritic')
+#             adata_pp.obs['a/d'] = pd.Categorical(labels)
+#             sc.pp.normalize_total(adata_pp, target_sum=1e4)
+#             sc.tl.rank_genes_groups(adata_pp, groupby='a/d', method='wilcoxon')
+#             de_df = sc.get.rank_genes_groups_df(adata_pp, group="axonic")
+#             de_df['is_marker'] = de_df['names'].isin(axon_markers + dendrite_markers)
+#             if remove_markers:
+#                 de_df = de_df[~de_df['is_marker']]
+#             de_df['-log10(FDR)'] = -np.log10(de_df['pvals_adj'].fillna(1.0)+ 1e-300)
+#             de_df['logfoldchanges'] = de_df['logfoldchanges'].clip(-lfc_cap, lfc_cap)
+#             adata.uns["wilcoxon"]["pre_vs_post"] = de_df
+#     elif method == "proportion":
+#         if 'proportion' not in adata.uns:
+#             adata.uns['proportion'] = {}
+#         if mode == "a_vs_d":
+#             axon_map = array_usr[a_map == 1].copy()
+#             dendrite_map = array_usr[d_map == 1].copy()
+#             rows = []
+#             for i in adata.uns['genes']:
+#                 c1 = axon_map[:,list(adata.uns['genes']).index(i)].sum()
+#                 c2 = dendrite_map[:,list(adata.uns['genes']).index(i)].sum()
+#                 n1 = a_map.sum()
+#                 n2 = d_map.sum()
+#                 stat, pval = proportions_ztest([c1, c2], [n1, n2])
+#                 rows.append([i, c1, c2, n1, n2, stat, pval])
+#             df_z = pd.DataFrame(rows, columns=['gene', 'c1', 'c2', 'n1', 'n2', 'zscore', 'pvalue'])
+#             pvals = df_z['pvalue'].values
+#             _, p_bonf, _, _ = multipletests(pvals, method='bonferroni')
+#             df_z['fdr'] = p_bonf
+#             df_z = df_z.sort_values(by="zscore", ascending=False)
+#             adata.uns["proportion"]["a_vs_d"] = df_z
+#         elif mode == "pre_vs_post":
+#             interface_map = adata.uns['interface_map']
+#             axon_map = adata.uns['axon_map']
+#             dendrite_map = adata.uns['dendrite_map']
+#             axon_interface = interface_map * axon_map
+#             dendrite_interface = interface_map * dendrite_map
+#             presyn_map = array_usr[axon_interface == 1].copy()
+#             postsyn_map = array_usr[dendrite_interface == 1].copy()
+#             rows = []
+#             for i in adata.uns['genes']:
+#                 c1 = presyn_map[:,list(adata.uns['genes']).index(i)].sum()
+#                 c2 = postsyn_map[:,list(adata.uns['genes']).index(i)].sum()
+#                 n1 = axon_interface.sum()
+#                 n2 = dendrite_interface.sum()
+#                 stat, pval = proportions_ztest([c1, c2], [n1, n2])
+#                 rows.append([i, c1, c2, n1, n2, stat, pval])
+#             df_z = pd.DataFrame(rows, columns=['gene', 'c1', 'c2', 'n1', 'n2', 'zscore', 'pvalue'])
+#             pvals = df_z['pvalue'].values
+#             _, p_bonf, _, _ = multipletests(pvals, method='bonferroni')
+#             df_z['fdr'] = p_bonf
+#             df_z = df_z.sort_values(by="zscore", ascending=False)
+#             adata.uns["proportion"]["pre_vs_post"] = df_z
+#     return adata
 
-def enrichment(adata: ad.AnnData, mode = "a_vs_d", lfc_threshold = 3, pval_threshold = 1e-5, threshold = None, organism = 10090, device = 'cpu'):
-    de_df = adata.uns[mode]
-    genes = list(adata.uns['genes'])
-    de_df['significance'] = de_df.apply(categorize_gene, axis=1, args=(lfc_threshold, pval_threshold))
-    de_df['point_size'] = de_df['significance'].map(size_mapping)
-    df_up = get_panther(','.join(de_df[de_df.significance == "Upregulated"].names.values), ','.join(genes)).sort_values(by="fdr")
-    df_down = get_panther(','.join(de_df[de_df.significance == "Downregulated"].names.values), ','.join(genes)).sort_values(by="fdr")
-    if mode == "a_vs_d":
-        adata.uns['axon_enrichment'] = df_up
-        adata.uns['dendrite_enrichment'] = df_down
-    elif mode == "pre_vs_post":
-        adata.uns['presynapse_enrichment'] = df_up
-        adata.uns['postsynapse_enrichment'] = df_down
-    else:
-        raise ValueError("Mode should be either 'a_vs_d' or 'pre_vs_post'")
+# def enrichment(adata: ad.AnnData, mode = "a_vs_d", lfc_threshold = 3, pval_threshold = 1e-5, threshold = None, organism = 10090, device = 'cpu'):
+#     de_df = adata.uns["wilcoxon"][mode].copy()
+#     genes = list(adata.uns['genes'])
+#     de_df['significance'] = de_df.apply(categorize_gene, axis=1, args=(lfc_threshold, pval_threshold))
+#     de_df['point_size'] = de_df['significance'].map(size_mapping)
+#     df_up = get_panther(','.join(de_df[de_df.significance == "Upregulated"].names.values), ','.join(genes)).sort_values(by="fdr")
+#     df_down = get_panther(','.join(de_df[de_df.significance == "Downregulated"].names.values), ','.join(genes)).sort_values(by="fdr")
+#     if mode == "a_vs_d":
+#         adata.uns['axon_enrichment'] = df_up
+#         adata.uns['dendrite_enrichment'] = df_down
+#     elif mode == "pre_vs_post":
+#         adata.uns['axonic_interface_enrichment'] = df_up
+#         adata.uns['dendritic_interface_enrichment'] = df_down
+#     else:
+#         raise ValueError("Mode should be either 'a_vs_d' or 'pre_vs_post'")
+#     return adata
+
+
+def axon_dendrite_enrichment(
+    adata: ad.AnnData,
+    z_thr: float = 5.0,
+) -> ad.AnnData:
+    """
+    Compute axon-vs-dendrite proportions z-test, compartment specificity
+    DataFrames, and derived enrichment statistics.
+
+    The function does the following in one pass:
+
+    1. **Proportions z-test** (vectorised over all genes): for each gene,
+       tests whether its expression rate in axonic bins differs from its rate
+       in dendritic bins.  All bins of the same compartment are pooled; the
+       test statistic is the standard two-proportions z-score.
+
+    2. **Compartment specificity**: ``df_axon`` / ``df_dendrite`` give each
+       gene's fraction of total spatial expression found in axon / dendrite
+       bins, respectively.
+
+    3. **Derived columns** added to the z-test result:
+       ``p1``, ``p2``, ``log2fc``, ``mean_prop``, ``label``, ``is_marker``.
+
+    Results stored in ``adata.uns``:
+
+    * ``proportion['a_vs_d']``   – z-test DataFrame (gene, c1, c2, n1, n2,
+      zscore, pvalue, fdr, p1, p2, log2fc, mean_prop, label, is_marker)
+    * ``axon_enrichment_df``     – compartment specificity for axonic bins
+    * ``dendrite_enrichment_df`` – compartment specificity for dendritic bins
+
+    Parameters
+    ----------
+    adata : ad.AnnData
+        Must contain ``adata.uns`` keys: ``binned_data``, ``binned_data_shape``,
+        ``mask_ecm``, ``axon_map``, ``dendrite_map``, ``genes``.
+    z_thr : float
+        Z-score threshold for the ``label`` column.  Genes with
+        ``zscore > z_thr`` are labelled ``'axon'``, genes with
+        ``zscore < -z_thr`` are labelled ``'dendrite'``, and the rest ``'ns'``.
+
+    Returns
+    -------
+    ad.AnnData
+        Input ``adata`` with the new keys populated.
+    """
+    from scipy.stats import norm as _norm
+
+    array_usr = (
+        adata.uns['binned_data']
+        .toarray()
+        .reshape(adata.uns['binned_data_shape'])
+        * adata.uns['mask_ecm'][:, :, None]
+    ).copy()
+
+    axon_map     = adata.uns['axon_map']
+    dendrite_map = adata.uns['dendrite_map']
+    genes        = list(adata.uns['genes'])
+
+    # --- expression sums per compartment ------------------------------------
+    total_expr    = array_usr.sum(axis=(0, 1))               # (G,)
+    axon_expr     = array_usr[axon_map == 1].sum(axis=0)     # (G,)
+    dendrite_expr = array_usr[dendrite_map == 1].sum(axis=0) # (G,)
+
+    n1 = int((axon_map == 1).sum())      # total axon bins
+    n2 = int((dendrite_map == 1).sum())  # total dendrite bins
+
+    # --- vectorised proportions z-test --------------------------------------
+    c1 = axon_expr.astype(float)
+    c2 = dendrite_expr.astype(float)
+    p1 = c1 / n1
+    p2 = c2 / n2
+    p_pool = (c1 + c2) / (n1 + n2)
+    se = np.sqrt(p_pool * (1 - p_pool) * (1.0 / n1 + 1.0 / n2))
+    z  = np.where(se > 0, (p1 - p2) / se, np.nan)
+    pv = 2.0 * (1.0 - _norm.cdf(np.abs(np.nan_to_num(z, nan=0.0))))
+    pv[np.isnan(z)] = np.nan
+
+    _, fdr, _, _ = multipletests(np.nan_to_num(pv, nan=1.0), method='bonferroni')
+
+    # --- proportions z-test DataFrame ---------------------------------------
+    df_z = pd.DataFrame({
+        'gene':      genes,
+        'c1':        c1,
+        'c2':        c2,
+        'n1':        n1,
+        'n2':        n2,
+        'zscore':    z,
+        'pvalue':    pv,
+        'fdr':       fdr,
+        'p1':        p1,
+        'p2':        p2,
+        'log2fc':    np.log2((p1 + 1e-12) / (p2 + 1e-12)),
+        'mean_prop': (p1 + p2) / 2,
+    }).sort_values('zscore', ascending=False, ignore_index=True)
+
+    df_z['label'] = 'ns'
+    df_z.loc[df_z['zscore'] >  z_thr, 'label'] = 'axon'
+    df_z.loc[df_z['zscore'] < -z_thr, 'label'] = 'dendrite'
+
+    marker_genes = (
+        set(adata.uns.get('axon_markers', []))
+        | set(adata.uns.get('dendrite_markers', []))
+    )
+    df_z['is_marker'] = df_z['gene'].isin(marker_genes)
+
+    # --- compartment specificity DataFrames ---------------------------------
+    with np.errstate(divide='ignore', invalid='ignore'):
+        axon_frac     = np.where(total_expr > 0, axon_expr / total_expr, np.nan)
+        dendrite_frac = np.where(total_expr > 0, dendrite_expr / total_expr, np.nan)
+
+    df_axon     = pd.DataFrame({'count': axon_frac},     index=genes)
+    df_dendrite = pd.DataFrame({'count': dendrite_frac}, index=genes)
+
+    # --- store results ------------------------------------------------------
+    # if 'proportion' not in adata.uns:
+    #     adata.uns['proportion'] = {}
+    adata.uns['ptest_a_vs_d']   = df_z
+    adata.uns['axon_enrichment_df']     = df_axon
+    adata.uns['dendrite_enrichment_df'] = df_dendrite
     return adata

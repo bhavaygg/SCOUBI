@@ -55,37 +55,21 @@ def tstat_loss(X, P, eps=1e-8):
 def do_conv(matrix, kernel=None):
     return F.conv2d(matrix[None, None, :, :], kernel, padding='same')[0, 0]
 
-def precompute_zscore_shared(Z_1, Z_2, kernel, eps=1e-30):
-    """Compute epoch-level invariants shared across all pairs."""
+def get_zscore(Z_1, Z_2, x_a, x_b, kernel, eps = 1e-30):
     agg_Z_2 = do_conv(Z_2, kernel)
-    Z_prod = Z_1 * agg_Z_2
-    N = torch.sum(Z_prod)
-    Z_prod_sq_sum = torch.sum(Z_prod ** 2)
-    Z_1_sum = torch.sum(Z_1)
-    Z_2_sum = torch.sum(Z_2)
-    return agg_Z_2, Z_prod, N, Z_prod_sq_sum, Z_1_sum, Z_2_sum
-
-
-def get_zscore_pair(Z_1, Z_2, x_a, x_b, kernel,
-                    agg_Z_2, Z_prod, N, Z_prod_sq_sum,
-                    Z_1_sum, Z_2_sum, eps=1e-30, iid=True):
-    """Compute z-score for a single pair using pre-computed shared tensors."""
     agg_Z_2_x_b = do_conv(Z_2 * x_b, kernel)
+    Z_prod = Z_1 * agg_Z_2
+
+    N = torch.sum(Z_prod)
     X = torch.sum((Z_1 * x_a) * agg_Z_2_x_b)
-    p_a = torch.sum(x_a * Z_1) / (Z_1_sum + eps)
-    p_d = torch.sum(x_b * Z_2) / (Z_2_sum + eps)
+    p_a = torch.sum(x_a * Z_1) / (torch.sum(Z_1) + eps)
+    p_d = torch.sum(x_b * Z_2) / (torch.sum(Z_2) + eps)
     E_x = N * p_a * p_d
-    if iid:
-        var_X = torch.clamp(E_x * (1 - p_a * p_d), min=eps)
-    else:
-        E_x_2 = Z_prod_sq_sum * (p_a * p_d) ** 2 + (N ** 2 - Z_prod_sq_sum) * (p_a * p_d) ** 2
-        var_X = torch.clamp(E_x + E_x_2 - E_x ** 2, min=eps)
-    return (X - E_x) / torch.sqrt(var_X)
-
-
-def get_zscore(Z_1, Z_2, x_a, x_b, kernel, eps=1e-30, iid=True):
-    shared = precompute_zscore_shared(Z_1, Z_2, kernel, eps)
-    return get_zscore_pair(Z_1, Z_2, x_a, x_b, kernel, *shared, eps=eps, iid=iid)
+    E_x_2 = torch.sum((Z_prod * p_a * p_d)**2) + (torch.sum(Z_prod)**2 - torch.sum(Z_prod**2)) * (p_a * p_d)**2
+    var_X = E_x + E_x_2 - E_x**2
+    var_X = torch.clamp(var_X, min=eps)
+    z_score = (X - E_x) / torch.sqrt(var_X)
+    return z_score
 
 def _prep_dict(array_usr, pairs, genes, device):
     x_bin = {}
@@ -98,63 +82,7 @@ def _prep_dict(array_usr, pairs, genes, device):
                 x_bin[g_idx] = torch.from_numpy(array_usr[:, :, g_idx]).float().to(device)
     return x_bin, x_shape, gene_to_idx
 
-def train(adata, axon_markers, dendrite_markers, pairs = None, epochs = 500, lambda_gex = 1e-1, lambda_comm = 1, ftemp = 1e-1, patience = 50, lr = 1e-3, device='cpu', weight_decay=1e-4, seed = 42, tol = 1e-2, do_comm = True, iid=True):
-    """Train the BinAnnotator model to assign spatial bins to axon or dendrite identity.
-
-    Optimizes a joint loss combining a GEX alignment term (t-statistic between
-    annotated compartments) and a communication term (z-score enrichment of
-    ligand-receptor co-localisation across neighbouring bins).
-
-    Parameters
-    ----------
-    adata : AnnData
-        Spatial transcriptomics object. Must contain ``adata.uns['binned_data']``,
-        ``adata.uns['binned_data_shape']``, ``adata.uns['mask_ecm']``, and
-        ``adata.uns['genes']``.
-    axon_markers : list of str
-        Gene names used as axon compartment markers.
-    dendrite_markers : list of str
-        Gene names used as dendrite compartment markers.
-    pairs : list of (str, str) or None, optional
-        Ligand-receptor gene pairs for the communication loss. Defaults to the
-        bundled ``pairs.pkl`` resource.
-    epochs : int, optional
-        Maximum number of training epochs (default 500).
-    lambda_gex : float, optional
-        Weight for the GEX alignment loss term (default 0.1).
-    lambda_comm : float, optional
-        Weight for the communication loss term (default 1).
-    ftemp : float, optional
-        Softmax temperature used when computing final bin probabilities after
-        training (default 0.1).
-    patience : int, optional
-        Early-stopping patience in epochs (default 50).
-    lr : float, optional
-        AdamW learning rate (default 1e-3).
-    device : str, optional
-        Torch device string, e.g. ``'cpu'`` or ``'cuda'`` (default ``'cpu'``).
-    weight_decay : float, optional
-        AdamW weight decay (default 1e-4).
-    seed : int, optional
-        Random seed for reproducibility (default 42).
-    tol : float, optional
-        Minimum loss improvement required to reset the patience counter
-        (default 1e-2).
-    do_comm : bool, optional
-        Whether to include the communication loss (default True).
-    iid : bool, optional
-        Variance model for the communication z-score. ``True`` (default) uses
-        the fast closed-form ``var = E[X] * (1 - p_a * p_d)``; ``False`` uses
-        the full spatial covariance formula.
-
-    Returns
-    -------
-    AnnData
-        The input ``adata`` updated in-place with the following keys in
-        ``adata.uns``: ``'model_weights'``, ``'bin_probabilities'``,
-        ``'bin_scores'``, ``'lr_pairs'``, ``'axon_markers'``,
-        ``'dendrite_markers'``.
-    """
+def train(adata, axon_markers, dendrite_markers, pairs = None, epochs = 500, lambda_gex = 1e-1, lambda_comm = 1, ftemp = 1e-1, patience = 50, lr = 1e-3, device='cpu', weight_decay=1e-4, seed = 42, tol = 1e-2, do_comm = True):
     set_seed(seed)
     if pairs is None:
         with resources.open_binary("scoubi.data", "pairs.pkl") as fp:
@@ -190,7 +118,6 @@ def train(adata, axon_markers, dendrite_markers, pairs = None, epochs = 500, lam
     best_loss = float('inf')
     best_model_weights = None
 
-    kernel_dev = kernel.to(device)
     pbar = trange(epochs, desc="Training", unit="epoch")
     for epoch in pbar:
         optimizer.zero_grad()
@@ -209,13 +136,12 @@ def train(adata, axon_markers, dendrite_markers, pairs = None, epochs = 500, lam
         Z_d = Z[:, 1].reshape(x_shape)
         ct_loss_for_n1 = 0.0
         if do_comm:
-            shared = precompute_zscore_shared(Z_a, Z_d, kernel_dev)
             for gp in pairs:
                 a_idx, b_idx = gene_to_idx.get(gp[0]), gene_to_idx.get(gp[1])
-                if a_idx is None or b_idx is None or a_idx not in x_bin or b_idx not in x_bin:
+                if a_idx is None or b_idx is None or a_idx not in x_bin or b_idx not in x_bin: 
                     continue
                 x_a, x_b = x_bin[a_idx], x_bin[b_idx]
-                ct_loss_for_n1 -= get_zscore_pair(Z_a, Z_d, x_a, x_b, kernel_dev, *shared, iid=iid)
+                ct_loss_for_n1 -= get_zscore(Z_a, Z_d, x_a, x_b, kernel.to(device))
 
         total_loss = gex_loss_term + (lambda_comm * ct_loss_for_n1 / len(pairs))
         total_loss.backward()

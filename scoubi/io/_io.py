@@ -14,10 +14,15 @@ class LazyTranscripts:
         if self._df is None:
             self._df = pd.read_parquet(self.path)
         return self._df
+    def save(self):
+        if self._df is not None:
+            self._df.to_parquet(self.path)
+        else:
+            raise("DataFrame not loaded.")
     def __call__(self):
         return self.load()
     def __getattr__(self, name):
-        return getattr(self.load(), name)
+        raise AttributeError("Access only via .load()")
     def __getitem__(self, key):
         return self.load()[key]
 
@@ -33,38 +38,41 @@ def _attach_lazy_loader(adata):
     adata.get_transcripts = types.MethodType(_get_transcripts, adata)
 
 def _summarize(self):
-    """Structured summary of AnnData with grouped .uns fields."""
+    """Structured summary of AnnData with grouped .uns fields.
+
+    Groups are: data, annotations, maps, enrichment, comparison, testing,
+    interface, communication, misc.
+    Any .uns keys not in a known group are printed under 'other'.
+    """
     print(f"AnnData object with n_obs × n_vars = {self.n_obs} × {self.n_vars}")
-    print("obs:", ", ".join(self.obs_keys()))
-    print("obsm:", ", ".join(self.obsm_keys()))
+    print("obs:", ", ".join(self.obs.columns.tolist()))
+    print("obsm:", ", ".join(self.obsm.keys()))
     print("uns:")
 
     # --- Predefined grouping map ---
     group_map = {
         'data': [
-            'transcripts_path', 'data_shape', 'mask_cell', 'mask_ecm', 'binned_data', 'axon_markers', 'dendrite_markers', 'genes', 'lr_pairs'
+            'transcripts_path', 'data_shape', 'binned_data_shape',
+            'mask_cell', 'mask_ecm', 'binned_data',
+            'axon_markers', 'dendrite_markers', 'genes', 'lr_pairs'
         ],
-        'annotations': ['bin_probabilities'],
+        'annotations': ['bin_probabilities', 'bin_scores'],
         'maps': [
-            'axon_map', 'dendrite_map', 'presynapse_map', 'postsynapse_map'
+            'axon_map', 'dendrite_map', 'interface_map'
         ],
-        'enrichment': ['axon_enrichment', 'dendrite_enrichment',
-                       'presynapse_enrichment', 'postsynapse_enrichment'],
-        'comparison': ['a_vs_d', 'n_vs_s', 'pre_vs_post'],
-        'synapse': ['synapse_map', 'synapse_cell_type_profile', 'synapse_cell_type_region_profile', 'synapse_region_profile'],
-        'axonic-profiles': [
-            'axon_cell_type_profile', 'axon_cell_type_region_profile', 'presynapse_cell_type_profile', 'presynapse_cell_type_region_profile',
-            'axon_region_profile', 'presynapse_region_profile'
+        'enrichment': ['axon_enrichment_df', 'dendrite_enrichment_df'],
+        'comparison': ['ptest_a_vs_d'],
+        'testing': [
+            'empirical', 'regional_ptest',
+            'ptest_best_rank', 'ptest_best_rank_neuronal', 'ptest_best_rank_non_neuronal'
         ],
-        'dendritic-profiles': [
-            'dendrite_cell_type_profile', 'dendrite_cell_type_region_profile',
-            'postsynapse_cell_type_profile', 'postsynapse_cell_type_region_profile',
-            'dendrite_region_profile', 'postsynapse_region_profile'
+        'interface': ['interface_cell_type_profile', 'interface_cell_type_region_profile', 'interface_region_profile'],
+        'communication': [
+            'cellwhisper', 'cellwhisper_unfiltered', 'cellwhisper_lr', 'cellwhisper_regionwise',
+            'communication_cell_type_profile', 'communication_cell_type_region_profile',
+            'communication_region_profile', 'lr_edges'
         ],
-        'communication': ['cellwhisper', 'cellwhisper_lr', 'communication_cell_type_profile', 'communication_cell_type_region_profile',
-                          'communication_region_profile', 'lr_edges'],
-        'misc': ['knn_idx', 'knn_dists', 'presynapse_knn_idx', 'presynapse_knn_dists',
-                 'postsynapse_knn_idx', 'postsynapse_knn_dists', 'model_weights'],
+        'misc': ['interface_knn_idx', 'interface_knn_dists', 'model_weights'],
     }
 
     # flatten group map for lookup
@@ -87,12 +95,77 @@ def _attach_summarize(adata):
     adata.summarize = types.MethodType(_summarize, adata)
     return adata
 
-def load_data(filename: str, cell_type=None, region = None, qv_thresold=None,
-              filter_genes=('BLANK','NegControl','DeprecatedCodeword','UnassignedCodeword','Blank'),
-              usr_label="UNASSIGNED", overwrite = False) -> ad.AnnData:
+def load_data(
+    filename: str,
+    cell_type=None,
+    region=None,
+    qv_thresold=None,
+    filter_genes=('BLANK', 'NegControl', 'DeprecatedCodeword', 'UnassignedCodeword', 'Blank'),
+    usr_label="UNASSIGNED",
+    overwrite=False,
+) -> ad.AnnData:
     """
-    Load data from CSV/Parquet/H5AD, build sparse cell x gene matrix,
-    and store transcripts lazily.
+    Load spatial transcriptomics data and return an annotated AnnData object.
+
+    Reads transcript-level data from a CSV, Parquet, or pre-built H5AD file,
+    constructs a sparse cell × gene count matrix, stores spatial coordinates,
+    writes a sidecar Parquet for lazy transcript access, and attaches two
+    convenience methods to the returned object:
+
+    * ``adata.summarize()``        – prints a structured overview (see :func:`_summarize`)
+    * ``adata.get_transcripts()``  – lazily loads the transcript table (see :func:`_attach_lazy_loader`)
+
+    Parameters
+    ----------
+    filename : str
+        Path to the input file.  Accepted formats:
+
+        * ``.parquet`` / ``.csv``  – raw transcript table with columns
+          ``cell_id``, ``gene`` (or ``feature_name``), and optionally
+          ``x_location``, ``y_location``, ``z_location``, ``qv``.
+        * ``.h5ad`` – previously saved AnnData; loaded directly and
+          returned after re-attaching the lazy-loader and summarize methods.
+    cell_type : str, optional
+        Path to a CSV file (index = cell IDs) containing a single column
+        of cell-type labels.  Stored in ``adata.obs['cell_type']``.
+    region : str, optional
+        Path to a CSV file (index = cell IDs) containing a single column
+        of region labels.  Stored in ``adata.obs['region']``.
+    qv_thresold : float, optional
+        Minimum quality-value score.  Transcripts with ``qv < qv_threshold``
+        are dropped before matrix construction.  No filtering if ``None``.
+    filter_genes : tuple[str, ...], optional
+        Gene-name prefixes to exclude (e.g. blanks, negative controls).
+        Default: ``('BLANK', 'NegControl', 'DeprecatedCodeword',
+        'UnassignedCodeword', 'Blank')``.
+    usr_label : str, optional
+        Cell-ID value used to mark unassigned transcripts.  Rows with this
+        label are excluded from the count matrix but retained in the saved
+        transcript Parquet.  Default: ``'UNASSIGNED'``.
+    overwrite : bool, optional
+        If ``True``, the sidecar Parquet is written to `filename` directly
+        instead of ``<stem>_scoubi.parquet``.  Default: ``False``.
+
+    Returns
+    -------
+    ad.AnnData
+        AnnData object with:
+
+        * ``X``                  – sparse (CSR) cell × gene count matrix
+        * ``obsm['spatial']``    – mean (x, y[, z]) coordinates per cell
+        * ``uns['transcripts_path']`` – path to the sidecar Parquet
+        * ``adata.summarize()``  – bound summary method
+        * ``adata.get_transcripts()`` – bound lazy transcript accessor
+
+    Raises
+    ------
+    ValueError
+        If ``filename`` does not end with ``.csv``, ``.parquet``, or ``.h5ad``.
+
+    See Also
+    --------
+    _summarize : Prints a grouped overview of all AnnData fields.
+    _attach_lazy_loader : Attaches the ``get_transcripts()`` method.
     """
     # --- read input ---
     if filename.endswith('.parquet'):
@@ -133,15 +206,15 @@ def load_data(filename: str, cell_type=None, region = None, qv_thresold=None,
     if 'z_location' in df_cell.columns:
         loc_cols.append('z_location')
     if loc_cols:
-        spatial = df_cell.groupby(df_cell['cell_id'].astype(str))[loc_cols].first()
+        spatial = df_cell.groupby(df_cell['cell_id'].astype(str))[loc_cols].mean()
         spatial = spatial.reindex(obs.index)
-        adata.obsm['spatial'] = spatial
+        adata.obsm['spatial'] = spatial.values
 
     # --- save transcripts parquet (full df) ---
     if not overwrite:
-        parquet_path = os.path.splitext(filename)[0] + "_scoubi.parquet"
+        parquet_path = os.path.abspath(os.path.splitext(filename)[0] + "_scoubi.parquet")
     else:
-        parquet_path = filename
+        parquet_path = os.path.abspath(filename)
     df.to_parquet(parquet_path, index=False)
     adata.uns['transcripts_path'] = parquet_path
     _attach_lazy_loader(adata)
@@ -159,4 +232,5 @@ def load_data(filename: str, cell_type=None, region = None, qv_thresold=None,
         df_rg.index = df_rg.index.astype(str)
         adata.obs['region'] = df_rg.reindex(obs.index)
 
+    del df, X, data
     return adata

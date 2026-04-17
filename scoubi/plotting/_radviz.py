@@ -8,10 +8,10 @@ import matplotlib.colors as mcolors
 from adjustText import adjust_text
 
 def radviz(df_profile, cell_types = None, group_mapping = None, fraction_threshold = 0.1,
-                     bandwidth=1, max_alpha=0.65, grid_size=400,
+                     bandwidth=1, max_alpha=0.65, grid_size=400, beta = 10,
                      jitter_strength=0.05, eps=0.02, pad=1.1, s_scale=100,
                      radius_threshold=0.25,
-                     class_colors_hex=None, annotate = False, annotation_radius = 0.75, annotation_size = None, return_genes = False, ax = None):
+                     class_colors_hex=None, annotate = False, annotation_radius = 0.75, annotation_size = None, return_genes = False, ax = None, show = True, annotation_fontsize = 9):
     """
     Generate a Radviz plot with KDE-based background for groups.
     Points near center are assigned 'None' group.
@@ -61,7 +61,7 @@ def radviz(df_profile, cell_types = None, group_mapping = None, fraction_thresho
     # df_reordered = df_reordered.loc[df_reordered.sum(axis=1) > 0]
 
     # ---------------- Step 2: Compute Radviz Coordinates ----------------
-    def compute_radviz(data, beta=10):
+    def compute_radviz(data, beta=beta):
         cols = data.columns
         n = len(cols)
         angles = np.linspace(0, 2*np.pi, n, endpoint=False)
@@ -186,13 +186,15 @@ def radviz(df_profile, cell_types = None, group_mapping = None, fraction_thresho
 
     # ---------------- Step 6: Plot ----------------
     if ax is None:
-        fig, ax = plt.subplots(figsize=(10,10))
-    ax.imshow(final_image, origin='lower', extent=(-pad,pad,-pad,pad), zorder=0)
+        fig, ax_ = plt.subplots(figsize=(10,10))
+    else:
+        ax_ = ax
+    ax_.imshow(final_image, origin='lower', extent=(-pad,pad,-pad,pad), zorder=0)
 
     # Anchors
     for f in anchors.index:
-        ax.scatter(anchors.loc[f,'x'], anchors.loc[f,'y'], s=30, color='0.3', edgecolor='black', linewidth=0.6, alpha=0.8, zorder=4)
-        ax.text(1.15*anchors.loc[f,'x'], 1.15*anchors.loc[f,'y'], f,
+        ax_.scatter(anchors.loc[f,'x'], anchors.loc[f,'y'], s=30, color='0.3', edgecolor='black', linewidth=0.6, alpha=0.8, zorder=4)
+        ax_.text(1.15*anchors.loc[f,'x'], 1.15*anchors.loc[f,'y'], f,
                 ha='center', va='center', fontsize=12, weight='bold', zorder=5)
     
     # Fade-to-white for points
@@ -202,7 +204,7 @@ def radviz(df_profile, cell_types = None, group_mapping = None, fraction_thresho
     for i, g in enumerate(coords['assigned_group']):
         if g=='None':
             col = np.array([0.85,0.85,0.85])
-            a = 0.4
+            a = 0.3
         else:
             # idx = list(unique_groups).index(g) % len(class_colors)
             col = group_to_color[g]
@@ -210,7 +212,7 @@ def radviz(df_profile, cell_types = None, group_mapping = None, fraction_thresho
         final_col = (1-fade[i])*col + fade[i]*np.array([1,1,1])
         blended_colors.append(final_col)
         alphas.append(a)
-    ax.scatter(coords['x_jitter'], coords['y_jitter'],
+    ax_.scatter(coords['x_jitter'], coords['y_jitter'],
                facecolors=blended_colors, edgecolors='black',
                linewidths=0.4, s=s_scale * coords.s.values, alpha=alphas, zorder=3)
     if annotate:
@@ -224,22 +226,32 @@ def radviz(df_profile, cell_types = None, group_mapping = None, fraction_thresho
                 continue
 
             texts.append(
-                ax.text(
+                ax_.text(
                     row['x_jitter'], row['y_jitter'], i,
-                    fontsize=9, fontweight='bold',
+                    fontsize=annotation_fontsize, fontweight='bold',
                     color='black', zorder=4
                 )
             )
-        adjust_text(texts, ax=ax, arrowprops=dict(arrowstyle='-', color='gray', lw=0.5))
+        adjust_text(texts, ax=ax_, arrowprops=dict(arrowstyle='-', color='gray', lw=0.5))
         coords['assigned_group'] = np.where(coords['radius'].round(2) <= annotation_radius, 'None', coords['assigned_group'])
     # Circle boundary
     circle = plt.Circle((0,0),1.0,color='gray',fill=False,linestyle='--',linewidth=1.2,zorder=2)
-    ax.add_artist(circle)
+    ax_.add_artist(circle)
 
-    ax.set_aspect('equal')
-    ax.axis('off')
-    plt.tight_layout()
-    plt.show()
+    # ax_.set_clip_on(False)
+    # ax_.set_xlim(-2.5,2.5)
+    # ax_.set_ylim(-2.5,2.5)
 
+    ax_.set_aspect('equal')
+    ax_.axis('off')
+    # plt.tight_layout()
+    if show:
+        plt.show()
+
+    if ax is not None:
+        if return_genes:
+            return ax_, coords
+        return ax_
+    plt.close()
     if return_genes:
         return coords

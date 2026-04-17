@@ -9,95 +9,120 @@ def get_whisper_edges(Z_1, Z_2, x_a, x_b, device):
     X = (Z_1 * x_a) * agg_Z_2_x_b
     return X
 
-def expression_profile(adata, mode = "cell_type", threshold = None):
-    array_usr = adata.uns["binned_data"]
+# def expression_profile(adata, key = "cell_type", threshold = None):
+#     array_usr = (adata.uns['binned_data'].toarray().reshape(adata.uns['binned_data_shape']) * adata.uns["mask_ecm"][:, :, None]).copy()
+#     genes = adata.uns['genes']
+
+#     if key not in adata.obs:
+#         raise ValueError(f"adata.obs must contain '{key}' column for key '{key}'")
+#     cell_types = adata.obs[key].values
+#     unique_types = np.unique(adata.obs[key].values)
+
+#     coords = []
+#     for synapse_key in ['presynapse', 'postsynapse']:
+#         target_coords_xy = np.argwhere(adata.uns[f"{synapse_key}_map"] == 1)
+#         inverted_dict = {t: [] for t in unique_types}
+#         knn_idx = adata.uns[f"{synapse_key}_knn_idx"]
+#         for i, bins in enumerate(knn_idx):
+#             closest_types = cell_types[bins]
+#             for t in closest_types:
+#                 inverted_dict[t].append(tuple(target_coords_xy[i]))
+#         coords.append(inverted_dict)
+#     def profile_dict(coord_dict):
+#         result = {}
+#         for t, v in coord_dict.items():
+#             if len(v) == 0:
+#                 continue
+#             rows, cols = zip(*v)  # separate row and col
+#             rows = np.array(rows)
+#             cols = np.array(cols)
+#             # Flatten first two dimensions using tuple indexing
+#             values = array_usr[rows, cols, :]  # shape (len(v), n_genes)
+#             # result[t] = values.mean(axis=0)
+#             binary = (values > 0).astype(float)
+#             result[t] = binary.mean(axis=0)
+#         return result
+#     a_dict = profile_dict(coords[0])
+#     d_dict = profile_dict(coords[1])
+
+#     a_df = pd.DataFrame.from_dict(a_dict, orient="index", columns=genes)
+#     d_df = pd.DataFrame.from_dict(d_dict, orient="index", columns=genes)
+
+#     s_df = (a_df + d_df).loc[:, lambda df: df.sum() != 0]
+#     # a_df[a_df < threshold] = 0
+#     # d_df[d_df < threshold] = 0
+#     # s_df[s_df < threshold] = 0
+
+#     combined = list(set(adata.uns['axon_markers']).union(adata.uns['dendrite_markers']))
+#     s_df = s_df.drop(columns=combined, errors="ignore")
+#     a_df = a_df.drop(columns=combined, errors="ignore")
+#     d_df = d_df.drop(columns=combined, errors="ignore")
+#     a_df = a_df.loc[:, a_df.sum() != 0]
+#     d_df = d_df.loc[:, d_df.sum() != 0]
+#     s_df = s_df.loc[:, s_df.sum() != 0]
+
+#     adata.uns[f"presynapse_{key}_profile"] = a_df.T
+#     adata.uns[f"postsynapse_{key}_profile"] = d_df.T
+#     adata.uns[f"synapse_{key}_profile"] = s_df.T
+#     return adata
+
+def expression_profile(adata, key = "cell_type", threshold = None, normalize = False):
+    array_usr = (adata.uns['binned_data'].toarray().reshape(adata.uns['binned_data_shape']) * adata.uns["mask_ecm"][:, :, None]).copy()
     genes = adata.uns['genes']
 
-    if mode == "cell_type":
-        if 'cell_type' not in adata.obs:
-            raise ValueError("adata.obs must contain 'cell_type' column for mode 'cell_type'")
-        cell_types = adata.obs['cell_type'].values
-        unique_types = np.unique(adata.obs['cell_type'].values)
-    elif mode == "region":
-        if 'region' not in adata.obs:
-            raise ValueError("adata.obs must contain 'region' column for mode 'region'")
-        cell_types = adata.obs['region'].values
-        unique_types = np.unique(adata.obs['region'].values)
-    elif mode =="cell_type_region":
-        if 'cell_type' not in adata.obs or 'region' not in adata.obs:
-            raise ValueError("adata.obs must contain both 'cell_type' and 'region' columns for mode 'cell_type_region'")
-        cell_types = (adata.obs['cell_type'].astype(str) + "_" + adata.obs['region'].astype(str)).values
-        unique_types = np.unique(adata.obs['cell_type'].astype(str) + "_" + adata.obs['region'].astype(str))
-    else:
-        raise ValueError("Mode must be one of 'cell_type', 'region', or 'cell_type_region'")
-    
-    coords = []
-    for key in ['presynapse', 'postsynapse']:
-        target_coords_xy = np.argwhere(adata.uns[f"{key}_map"] == 1)
-        inverted_dict = {t: [] for t in unique_types}
-        knn_idx = adata.uns[f"{key}_knn_idx"]
-        for i, bins in enumerate(knn_idx):
-            closest_types = cell_types[bins]
-            for t in closest_types:
-                inverted_dict[t].append(tuple(target_coords_xy[i]))
-        coords.append(inverted_dict)
+    if key not in adata.obs:
+        raise ValueError(f"adata.obs must contain '{key}' column for key '{key}'")
+    cell_types = adata.obs[key].values
+    unique_types = np.unique(adata.obs[key].values)
+
+    target_coords_xy = np.argwhere(adata.uns["interface_map"] == 1)
+    inverted_dict = {t: [] for t in unique_types}
+    knn_idx = adata.uns["interface_knn_idx"]
+    for i, bins in enumerate(knn_idx):
+        closest_types = cell_types[bins]
+        for t in closest_types:
+            inverted_dict[t].append(tuple(target_coords_xy[i]))
+
+    if normalize:
+        H, W, n_genes = array_usr.shape
+        global_mean = array_usr.reshape(-1, n_genes).mean(axis=0)
+        global_mean = np.where(global_mean == 0, 1.0, global_mean)
+
     def profile_dict(coord_dict):
         result = {}
         for t, v in coord_dict.items():
             if len(v) == 0:
                 continue
-            rows, cols = zip(*v)  # separate row and col
+            rows, cols = zip(*v)
             rows = np.array(rows)
             cols = np.array(cols)
-            # Flatten first two dimensions using tuple indexing
             values = array_usr[rows, cols, :]  # shape (len(v), n_genes)
-            # result[t] = values.mean(axis=0)
-            binary = (values > 0).astype(float)
-            result[t] = binary.mean(axis=0)
+            if normalize:
+                result[t] = values.mean(axis=0) / global_mean
+            else:
+                binary = (values > 0).astype(float)
+                result[t] = binary.mean(axis=0)
         return result
-    a_dict = profile_dict(coords[0])
-    d_dict = profile_dict(coords[1])
 
-    a_df = pd.DataFrame.from_dict(a_dict, orient="index", columns=genes)
-    d_df = pd.DataFrame.from_dict(d_dict, orient="index", columns=genes)
-
-    s_df = (a_df + d_df).loc[:, lambda df: df.sum() != 0]
-    # a_df[a_df < threshold] = 0
-    # d_df[d_df < threshold] = 0
-    # s_df[s_df < threshold] = 0
+    s_dict = profile_dict(inverted_dict)
+    s_df = pd.DataFrame.from_dict(s_dict, orient="index", columns=genes)
+    s_df = s_df.loc[:, lambda df: df.sum() != 0]
 
     combined = list(set(adata.uns['axon_markers']).union(adata.uns['dendrite_markers']))
     s_df = s_df.drop(columns=combined, errors="ignore")
-    a_df = a_df.drop(columns=combined, errors="ignore")
-    d_df = d_df.drop(columns=combined, errors="ignore")
-    a_df = a_df.loc[:, a_df.sum() != 0]
-    d_df = d_df.loc[:, d_df.sum() != 0]
     s_df = s_df.loc[:, s_df.sum() != 0]
 
-    adata.uns[f"presynapse_{mode}_profile"] = a_df.T
-    adata.uns[f"postsynapse_{mode}_profile"] = d_df.T
-    adata.uns[f"synapse_{mode}_profile"] = s_df.T
+    suffix = "_normalized" if normalize else ""
+    adata.uns[f"interface_{key}_profile{suffix}"] = s_df.T
     return adata
 
-def communication_profile(adata, mode = "cell_type", k = 1, threshold = None, device = 'cpu'):
-    if mode == "cell_type":
-        if 'cell_type' not in adata.obs:
-            raise ValueError("adata.obs must contain 'cell_type' column for mode 'cell_type'")
-        cell_types = adata.obs['cell_type'].values
-        unique_types = np.unique(adata.obs['cell_type'].values)
-    elif mode == "region":
-        if 'region' not in adata.obs:
-            raise ValueError("adata.obs must contain 'region' column for mode 'region'")
-        cell_types = adata.obs['region'].values
-        unique_types = np.unique(adata.obs['region'].values)
-    elif mode =="cell_type_region":
-        if 'cell_type' not in adata.obs or 'region' not in adata.obs:
-            raise ValueError("adata.obs must contain both 'cell_type' and 'region' columns for mode 'cell_type_region'")
-        cell_types = (adata.obs['cell_type'].astype(str) + "_" + adata.obs['region'].astype(str)).values
-        unique_types = np.unique(adata.obs['cell_type'].astype(str) + "_" + adata.obs['region'].astype(str))
-    else:
-        raise ValueError("Mode must be one of 'cell_type', 'region', or 'cell_type_region'")
-    array_usr = (adata.uns['binned_data'] * adata.uns["mask_ecm"][:, :, None]).copy()
+def communication_profile(adata, key = "cell_type", k = 1, threshold = None, device = 'cpu'):
+    if key not in adata.obs:
+        raise ValueError(f"adata.obs must contain '{key}' column for mode '{key}'")
+    cell_types = adata.obs[key].values
+    unique_types = np.unique(adata.obs[key].values)
+
+    array_usr = (adata.uns['binned_data'].toarray().reshape(adata.uns['binned_data_shape']) * adata.uns["mask_ecm"][:, :, None]).copy()
     genes = list(adata.uns['genes'])
     # # remove later
     # with open("../SCOUBI/scoubi/data/pairs.pkl", "rb") as fp:
@@ -105,7 +130,6 @@ def communication_profile(adata, mode = "cell_type", k = 1, threshold = None, de
     # pairs = [pair for pair in pairs if pair[0] in genes and pair[1] in genes]
     # #--------------
     pairs = adata.uns['lr_pairs'] 
-    genes = adata.uns['genes'].tolist()
     ad_map = torch.from_numpy(adata.uns['bin_probabilities'].copy()).float().to(device)
     binary_matrix_ecm = torch.from_numpy(adata.uns['mask_ecm'].copy()).float().to(device)
     binary_matrix_cell = torch.from_numpy(adata.uns['mask_cell'].copy()).float().to(device)
@@ -159,5 +183,5 @@ def communication_profile(adata, mode = "cell_type", k = 1, threshold = None, de
         count_table[lr] = count_table[lr].add(counts)
 
     adata.uns['lr_edges'] = edges
-    adata.uns[f'communication_{mode}_profile'] = count_table
+    adata.uns[f'communication_{key}_profile'] = count_table
     return adata
