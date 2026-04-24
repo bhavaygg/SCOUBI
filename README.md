@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="files/scoubi.png" alt="SCOUBI logo" width="720">
+  <img src="files/scoubi_transparent.png" alt="SCOUBI logo" width="720">
 </p>
 
 # SCOUBI
