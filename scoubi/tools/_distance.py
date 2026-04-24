@@ -12,7 +12,8 @@ def distance(adata, k = 1):
     if k == 1:
         dists = dists[:, np.newaxis]
         idxs = idxs[:, np.newaxis]
-    adata.uns[f"{key.split("_")[0]}_knn_dists"] = dists.astype(np.float32)
-    adata.uns[f"{key.split("_")[0]}_knn_idx"] = idxs 
+    prefix = key.split("_")[0]
+    adata.uns[f"{prefix}_knn_dists"] = dists.astype(np.float32)
+    adata.uns[f"{prefix}_knn_idx"] = idxs
 
     return adata

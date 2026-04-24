@@ -6,7 +6,6 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 import matplotlib.cm as cm
 from scipy import stats
-import scanpy as sc
 from ..model import get_zscore, do_conv, _prep_dict, kernel
 import pickle
 from ..plotting import size_mapping, categorize_gene
@@ -124,9 +123,10 @@ def axon_dendrite_enrichment(
     genes        = list(adata.uns['genes'])
 
     # --- expression sums per compartment ------------------------------------
-    total_expr    = array_usr.sum(axis=(0, 1))               # (G,)
-    axon_expr     = array_usr[axon_map == 1].sum(axis=0)     # (G,)
-    dendrite_expr = array_usr[dendrite_map == 1].sum(axis=0) # (G,)
+    total_expr = array_usr.sum(axis=(0, 1))  # (G,)
+    binary_expr = (array_usr > 0).astype(float)
+    axon_expr = binary_expr[axon_map == 1].sum(axis=0)      # (G,)
+    dendrite_expr = binary_expr[dendrite_map == 1].sum(axis=0)  # (G,)
 
     n1 = int((axon_map == 1).sum())      # total axon bins
     n2 = int((dendrite_map == 1).sum())  # total dendrite bins
@@ -138,9 +138,9 @@ def axon_dendrite_enrichment(
     p2 = c2 / n2
     p_pool = (c1 + c2) / (n1 + n2)
     se = np.sqrt(p_pool * (1 - p_pool) * (1.0 / n1 + 1.0 / n2))
-    z  = np.where(se > 0, (p1 - p2) / se, np.nan)
-    pv = 2.0 * (1.0 - _norm.cdf(np.abs(np.nan_to_num(z, nan=0.0))))
-    pv[np.isnan(z)] = np.nan
+    z = np.zeros_like(se, dtype=float)
+    np.divide(p1 - p2, se, out=z, where=se > 0)
+    pv = 2.0 * (1.0 - _norm.cdf(np.abs(z)))
 
     _, fdr, _, _ = multipletests(np.nan_to_num(pv, nan=1.0), method='bonferroni')
 
@@ -172,8 +172,8 @@ def axon_dendrite_enrichment(
 
     # --- compartment specificity DataFrames ---------------------------------
     with np.errstate(divide='ignore', invalid='ignore'):
-        axon_frac     = np.where(total_expr > 0, axon_expr / total_expr, np.nan)
-        dendrite_frac = np.where(total_expr > 0, dendrite_expr / total_expr, np.nan)
+        axon_frac = np.where(total_expr > 0, axon_expr / total_expr, 0.0)
+        dendrite_frac = np.where(total_expr > 0, dendrite_expr / total_expr, 0.0)
 
     df_axon     = pd.DataFrame({'count': axon_frac},     index=genes)
     df_dendrite = pd.DataFrame({'count': dendrite_frac}, index=genes)

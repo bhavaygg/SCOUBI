@@ -12,7 +12,7 @@ description = "Signaling-informed Characterization of Unresolved Biological Inte
 requires-python = ">=3.10"
 license = "MIT"
 readme = "README.md"
-keywords = ["spatial transcriptomics", "neuroscience", "ligand-receptor", "anndata", "bioinformatics"]
+keywords = ["spatial transcriptomics", "neuroscience", "bioinformatics"]
 classifiers = [
   "Development Status :: 3 - Alpha",
   "Intended Audience :: Science/Research",
@@ -20,11 +20,13 @@ classifiers = [
   "Programming Language :: Python :: 3.10",
   "Programming Language :: Python :: 3.11",
   "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
   "Topic :: Scientific/Engineering :: Bio-Informatics",
 ]
 dependencies = [
   "numpy>=1.26",
   "pandas>=2.3",
+  "pyarrow>=15",
   "scipy>=1.13",
   "scikit-learn>=1.6",
   "statsmodels>=0.13",

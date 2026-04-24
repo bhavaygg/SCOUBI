@@ -15,8 +15,8 @@ def expression_profile(adata, key = "cell_type", threshold = None, normalize = F
 
     if key not in adata.obs:
         raise ValueError(f"adata.obs must contain '{key}' column for key '{key}'")
-    cell_types = adata.obs[key].values
-    unique_types = np.unique(adata.obs[key].values)
+    cell_types = adata.obs[key].to_numpy(dtype=object)
+    unique_types = np.unique(cell_types)
 
     target_coords_xy = np.argwhere(adata.uns["interface_map"] == 1)
     inverted_dict = {t: [] for t in unique_types}
@@ -62,8 +62,8 @@ def expression_profile(adata, key = "cell_type", threshold = None, normalize = F
 def communication_profile(adata, key = "cell_type", k = 1, threshold = None, device = 'cpu'):
     if key not in adata.obs:
         raise ValueError(f"adata.obs must contain '{key}' column for mode '{key}'")
-    cell_types = adata.obs[key].values
-    unique_types = np.unique(adata.obs[key].values)
+    cell_types = adata.obs[key].to_numpy(dtype=object)
+    unique_types = np.unique(cell_types)
 
     array_usr = (adata.uns['binned_data'].toarray().reshape(adata.uns['binned_data_shape']) * adata.uns["mask_ecm"][:, :, None]).copy()
     genes = list(adata.uns['genes'])

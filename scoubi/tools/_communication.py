@@ -48,8 +48,8 @@ def run_cw_regionwise(adata: ad.AnnData, threshold = None, zscore_threshold = 3,
     if k == 1:
         dists = dists[:, np.newaxis]
         idxs = idxs[:, np.newaxis]
-    regions = adata.obs['region'].values
-    unique_types = np.unique(adata.obs['region'].values)
+    regions = adata.obs['region'].to_numpy(dtype=object)
+    unique_types = np.unique(regions)
     inverted_dict = {t: [] for t in unique_types}
     for i, bins in enumerate(idxs):
         closest_types = regions[bins]
