@@ -6,6 +6,40 @@ import sparse
 
 
 def bin_data(adata: ad.AnnData, binsize=5, debug=False):
+    """
+    Bin transcript-level data into a spatial grid and build a 3-D gene-expression tensor.
+
+    Reads the raw transcript table via ``adata.get_transcripts()``, assigns each
+    transcript to a 2-D spatial bin, and constructs a sparse (X_BINS × Y_BINS × n_genes)
+    count array.  Binary ECM and cell masks are derived from unassigned vs. assigned
+    transcripts.  The updated transcript table (with bin columns added) is written back
+    to the sidecar Parquet.
+
+    Parameters
+    ----------
+    adata : ad.AnnData
+        Must have ``adata.uns['transcripts_path']`` (set by :func:`scoubi.io.load_data`)
+        and a bound ``get_transcripts()`` method.  The transcript table must contain
+        columns ``x_location``, ``y_location``, ``cell_id``, and ``gene``.
+    binsize : int or float, optional
+        Physical size of each square bin in the same units as ``x_location`` /
+        ``y_location``.  Smaller values give finer resolution at higher memory cost.
+        Default: 5.
+    debug : bool, optional
+        Reserved for future use.  Default: False.
+
+    Returns
+    -------
+    ad.AnnData
+        The input ``adata`` updated in-place with:
+
+        * ``uns['binned_data']``       – CSR sparse matrix (X_BINS*Y_BINS × n_genes)
+        * ``uns['binned_data_shape']`` – ``[X_BINS, Y_BINS, n_genes]``
+        * ``uns['genes']``             – list of gene names (column order of the tensor)
+        * ``uns['mask_ecm']``          – binary (X_BINS × Y_BINS) ECM mask
+        * ``uns['mask_cell']``         – binary (X_BINS × Y_BINS) cell mask
+        * ``obsm['bin']``              – (n_cells × 2) mean binned coordinates per cell
+    """
     df = adata.get_transcripts().load()
 
     # -----------------------
@@ -70,8 +104,9 @@ def bin_data(adata: ad.AnnData, binsize=5, debug=False):
     binary_ecm = np.zeros((X_BINS, Y_BINS), dtype=np.int8)
     binary_cell = np.zeros((X_BINS, Y_BINS), dtype=np.int8)
 
-    ecm = df[df.cell_id == "UNASSIGNED"]
-    cell = df[df.cell_id != "UNASSIGNED"]
+    usr_label = adata.uns.get('usr_label', 'UNASSIGNED')
+    ecm = df[df.cell_id == usr_label]
+    cell = df[df.cell_id != usr_label]
 
     binary_ecm[ecm.x_binned, ecm.y_binned] = 1
     binary_cell[cell.x_binned, cell.y_binned] = 1

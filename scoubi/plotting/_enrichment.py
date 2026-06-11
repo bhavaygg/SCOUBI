@@ -39,7 +39,7 @@ def enrichment_scatter(
     """
     Volcano-like scatter of axon-vs-dendrite enrichment (log2fc vs z-score).
 
-    Data source: ``adata.uns['proportion']['a_vs_d']`` — must already contain
+    Data source: ``adata.uns['ptest_a_vs_d']`` — must already contain
     ``log2fc`` and ``zscore`` columns (call ``scoubi.tl.axon_dendrite_enrichment``
     first).
 
@@ -53,7 +53,7 @@ def enrichment_scatter(
     Parameters
     ----------
     adata : ad.AnnData
-        Must have ``adata.uns['proportion']['a_vs_d']`` with columns
+        Must have ``adata.uns['ptest_a_vs_d']`` with columns
         ``gene``, ``zscore``, ``log2fc``.
     top_k : int
         Number of top (axon-enriched) and bottom (dendrite-enriched) genes

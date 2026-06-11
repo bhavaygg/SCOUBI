@@ -9,7 +9,41 @@ def get_whisper_edges(Z_1, Z_2, x_a, x_b, device):
     X = (Z_1 * x_a) * agg_Z_2_x_b
     return X
 
-def expression_profile(adata, key = "cell_type", threshold = None, normalize = False):
+def expression_profile(adata, key="cell_type", threshold=None, normalize=False):
+    """
+    Build a gene-expression profile of interface bins grouped by a cell-level annotation.
+
+    For each interface bin (from ``adata.uns['interface_map']``), the nearest cell is
+    looked up via the pre-computed KNN index (``adata.uns['interface_knn_idx']``), and
+    its annotation label is used to group bins.  The per-group mean binary (or
+    normalised) expression across genes is returned as a DataFrame and stored in
+    ``adata.uns``.
+
+    Parameters
+    ----------
+    adata : ad.AnnData
+        Must contain ``adata.obs[key]``, ``adata.uns['interface_map']``,
+        ``adata.uns['interface_knn_idx']``, ``adata.uns['binned_data']``,
+        ``adata.uns['binned_data_shape']``, ``adata.uns['mask_ecm']``,
+        ``adata.uns['genes']``, ``adata.uns['axon_markers']``, and
+        ``adata.uns['dendrite_markers']``.
+    key : str, optional
+        Column in ``adata.obs`` used to group interface bins.
+        Default: ``'cell_type'``.
+    threshold : float, optional
+        Unused (reserved for future filtering).  Default: ``None``.
+    normalize : bool, optional
+        If ``True``, expression per group is divided by the global mean across all
+        bins (fold-change over background).  If ``False`` (default), returns the
+        fraction of bins in each group that express each gene.
+
+    Returns
+    -------
+    ad.AnnData
+        The input ``adata`` updated in-place with:
+
+        * ``uns[f'interface_{key}_profile']`` – DataFrame (genes × groups)
+    """
     array_usr = (adata.uns['binned_data'].toarray().reshape(adata.uns['binned_data_shape']) * adata.uns["mask_ecm"][:, :, None]).copy()
     genes = adata.uns['genes']
 
@@ -59,7 +93,43 @@ def expression_profile(adata, key = "cell_type", threshold = None, normalize = F
     adata.uns[f"interface_{key}_profile{suffix}"] = s_df.T
     return adata
 
-def communication_profile(adata, key = "cell_type", k = 1, threshold = None, device = 'cpu'):
+def communication_profile(adata, key="cell_type", k=1, threshold=None, device='cpu'):
+    """
+    Build a ligand-receptor communication profile grouped by a cell-level annotation.
+
+    For each significant LR pair (from ``adata.uns['cellwhisper_lr']``), computes the
+    spatial edge map (axon ligand → dendrite receptor co-localisation), finds the
+    midpoint of each edge, and assigns it to the nearest cell's annotation label.
+    The result is a count table of LR edges per group.
+
+    Parameters
+    ----------
+    adata : ad.AnnData
+        Must contain ``adata.obs[key]``, ``adata.uns['cellwhisper_lr']``,
+        ``adata.uns['bin_probabilities']``, ``adata.uns['lr_pairs']``,
+        ``adata.uns['binned_data']``, ``adata.uns['binned_data_shape']``,
+        ``adata.uns['mask_ecm']``, ``adata.uns['mask_cell']``,
+        ``adata.uns['genes']``, and ``adata.obsm['bin']``.
+    key : str, optional
+        Column in ``adata.obs`` used to group LR edges.
+        Default: ``'cell_type'``.
+    k : int, optional
+        Number of nearest-neighbour cells to consider per edge midpoint.
+        Default: 1.
+    threshold : float, optional
+        Probability threshold for binarising axon/dendrite maps.
+        Default: ``None`` (treated as 0.5 internally).
+    device : str, optional
+        Torch device string, e.g. ``'cpu'`` or ``'cuda'``.  Default: ``'cpu'``.
+
+    Returns
+    -------
+    ad.AnnData
+        The input ``adata`` updated in-place with:
+
+        * ``uns['lr_edges']``                    – dict mapping LR pair string to list of edges
+        * ``uns[f'communication_{key}_profile']`` – DataFrame (groups × LR pairs) of edge counts
+    """
     if key not in adata.obs:
         raise ValueError(f"adata.obs must contain '{key}' column for mode '{key}'")
     cell_types = adata.obs[key].to_numpy(dtype=object)

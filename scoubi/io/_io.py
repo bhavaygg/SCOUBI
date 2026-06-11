@@ -18,7 +18,7 @@ class LazyTranscripts:
         if self._df is not None:
             self._df.to_parquet(self.path)
         else:
-            raise("DataFrame not loaded.")
+            raise ValueError("DataFrame not loaded.")
     def __call__(self):
         return self.load()
     def __getattr__(self, name):
@@ -52,7 +52,7 @@ def _summarize(self):
     # --- Predefined grouping map ---
     group_map = {
         'data': [
-            'transcripts_path', 'data_shape', 'binned_data_shape',
+            'transcripts_path', 'usr_label', 'data_shape', 'binned_data_shape',
             'mask_cell', 'mask_ecm', 'binned_data',
             'axon_markers', 'dendrite_markers', 'genes', 'lr_pairs'
         ],
@@ -66,11 +66,10 @@ def _summarize(self):
             'empirical', 'regional_ptest',
             'ptest_best_rank', 'ptest_best_rank_neuronal', 'ptest_best_rank_non_neuronal'
         ],
-        'interface': ['interface_cell_type_profile', 'interface_cell_type_region_profile', 'interface_region_profile'],
+        'interface': ['interface_cell_type_profile', 'interface_region_profile'],
         'communication': [
             'cellwhisper', 'cellwhisper_unfiltered', 'cellwhisper_lr', 'cellwhisper_regionwise',
-            'communication_cell_type_profile', 'communication_cell_type_region_profile',
-            'communication_region_profile', 'lr_edges'
+            'communication_cell_type_profile', 'communication_region_profile', 'lr_edges'
         ],
         'misc': ['interface_knn_idx', 'interface_knn_dists', 'model_weights'],
     }
@@ -99,7 +98,7 @@ def load_data(
     filename: str,
     cell_type=None,
     region=None,
-    qv_thresold=None,
+    qv_threshold=None,
     filter_genes=('BLANK', 'NegControl', 'DeprecatedCodeword', 'UnassignedCodeword', 'Blank'),
     usr_label="UNASSIGNED",
     overwrite=False,
@@ -131,7 +130,7 @@ def load_data(
     region : str, optional
         Path to a CSV file (index = cell IDs) containing a single column
         of region labels.  Stored in ``adata.obs['region']``.
-    qv_thresold : float, optional
+    qv_threshold : float, optional
         Minimum quality-value score.  Transcripts with ``qv < qv_threshold``
         are dropped before matrix construction.  No filtering if ``None``.
     filter_genes : tuple[str, ...], optional
@@ -154,6 +153,7 @@ def load_data(
         * ``X``                  – sparse (CSR) cell × gene count matrix
         * ``obsm['spatial']``    – mean (x, y[, z]) coordinates per cell
         * ``uns['transcripts_path']`` – path to the sidecar Parquet
+        * ``uns['usr_label']``        – unassigned transcript label (forwarded to :func:`bin_data`)
         * ``adata.summarize()``  – bound summary method
         * ``adata.get_transcripts()`` – bound lazy transcript accessor
 
@@ -182,8 +182,8 @@ def load_data(
         raise ValueError("Unsupported file format. Use .csv, .parquet, or .h5ad.")
 
     # --- filter ---
-    if 'qv' in df.columns and qv_thresold is not None:
-        df = df[df.qv >= qv_thresold]
+    if 'qv' in df.columns and qv_threshold is not None:
+        df = df[df.qv >= qv_threshold]
     if 'feature_name' in df.columns:
         df = df.rename(columns={'feature_name':'gene'})
     df = df[~df['gene'].str.startswith(tuple(filter_genes), na=False)]
@@ -217,6 +217,7 @@ def load_data(
         parquet_path = os.path.abspath(filename)
     df.to_parquet(parquet_path, index=False)
     adata.uns['transcripts_path'] = parquet_path
+    adata.uns['usr_label'] = usr_label
     _attach_lazy_loader(adata)
     _attach_summarize(adata)
     ad.AnnData.summarize = _summarize

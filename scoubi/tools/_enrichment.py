@@ -15,21 +15,25 @@ from statsmodels.stats.multitest import multipletests
 datasets = {"BP": "GO:0008150", "CC": "GO:0005575", "MF": "GO:0003674"}
 
 def get_panther(geneset, background, organism = 10090):
-    '''
-        Perform GO enrichment analysis using PANTHERDB.
-        Arguments
-        ----------
-        geneset : str
-            Geneset to perform the analysis.
-        background : str
-            Background genes.
-        dataset : str
-            Dataset to perform the analysis.
-        organism : str
-            Organism to perform the analysis.
-        setting : str
-            Setting to perform the analysis. Either 'module' or 'cell'.
-    '''
+    """
+    Perform GO enrichment analysis using PANTHERDB.
+
+    Parameters
+    ----------
+    geneset : str
+        Comma-separated gene symbols to test.
+    background : str
+        Comma-separated background gene symbols.
+    organism : int, optional
+        NCBI taxonomy ID for the organism.  Default: 10090 (mouse).
+
+    Returns
+    -------
+    pd.DataFrame
+        Significant GO terms (BP, CC, MF) sorted by p-value with columns:
+        number_in_list, fold_enrichment, fdr, expected,
+        number_in_reference, pValue, term, id, dataset.
+    """
     df = pd.DataFrame()
     r_session = requests.Session()
     retries = Retry(total=5, backoff_factor=1, status_forcelist=[502, 503, 504])
@@ -89,7 +93,7 @@ def axon_dendrite_enrichment(
 
     Results stored in ``adata.uns``:
 
-    * ``proportion['a_vs_d']``   – z-test DataFrame (gene, c1, c2, n1, n2,
+    * ``ptest_a_vs_d``           – z-test DataFrame (gene, c1, c2, n1, n2,
       zscore, pvalue, fdr, p1, p2, log2fc, mean_prop, label, is_marker)
     * ``axon_enrichment_df``     – compartment specificity for axonic bins
     * ``dendrite_enrichment_df`` – compartment specificity for dendritic bins
@@ -116,7 +120,7 @@ def axon_dendrite_enrichment(
         .toarray()
         .reshape(adata.uns['binned_data_shape'])
         * adata.uns['mask_ecm'][:, :, None]
-    ).copy()
+    )
 
     axon_map     = adata.uns['axon_map']
     dendrite_map = adata.uns['dendrite_map']
@@ -124,9 +128,8 @@ def axon_dendrite_enrichment(
 
     # --- expression sums per compartment ------------------------------------
     total_expr = array_usr.sum(axis=(0, 1))  # (G,)
-    binary_expr = (array_usr > 0).astype(float)
-    axon_expr = binary_expr[axon_map == 1].sum(axis=0)      # (G,)
-    dendrite_expr = binary_expr[dendrite_map == 1].sum(axis=0)  # (G,)
+    axon_expr = (array_usr[axon_map == 1] > 0).sum(axis=0).astype(float)
+    dendrite_expr = (array_usr[dendrite_map == 1] > 0).sum(axis=0).astype(float)
 
     n1 = int((axon_map == 1).sum())      # total axon bins
     n2 = int((dendrite_map == 1).sum())  # total dendrite bins

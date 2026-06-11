@@ -127,7 +127,7 @@ def overview(
         and ``genes``.
     threshold : float, optional
         Probability threshold for binarising axon/dendrite maps.
-        Defaults to 0.5.
+        Default: ``None`` (treated as 0.5 internally).
     zscore_threshold : float
         Minimum CellWhisper z-score for a pair to be considered
         significant.  Default: 3.

@@ -14,30 +14,69 @@ def radviz(df_profile, cell_types = None, group_mapping = None, fraction_thresho
                      class_colors_hex=None, annotate = False, annotation_radius = 0.75, annotation_size = None, return_genes = False, ax = None, show = True, annotation_fontsize = 9):
     """
     Generate a Radviz plot with KDE-based background for groups.
-    Points near center are assigned 'None' group.
-    
+    Points near the centre are assigned to the ``'None'`` group.
+
     Parameters
     ----------
-    df : pd.DataFrame
-        Original feature dataframe (samples x features)
-    group_mapping : dict
-        Mapping of group_name -> list of features
-    bandwidth : float
-        KDE bandwidth (larger = smoother background)
-    max_alpha : float
-        Max opacity for densest KDE region
-    grid_size : int
-        Resolution of background grid
-    jitter_strength : float
-        Maximum jitter applied to overlapping points
-    eps : float
-        Radius threshold to consider points overlapping
-    pad : float
-        Grid extent padding
-    radius_threshold : float
-        Radius for 'None' group assignment (near center)
-    class_colors_hex : list of str
-        Hex color codes for each group, e.g. ['#FF6666', '#3399FF', '#33CC33']
+    df_profile : pd.DataFrame
+        Gene × group expression profile (genes as rows, groups as columns).
+        Typically ``adata.uns['interface_region_profile']`` or similar.
+    cell_types : list of str, optional
+        Subset of columns to include.  If ``None``, all columns are used.
+    group_mapping : dict, optional
+        Mapping of ``group_name -> list of column names`` for anchor grouping.
+        If ``None``, each column is its own anchor.
+    fraction_threshold : float, optional
+        Genes whose maximum fraction across groups is below this value are
+        excluded before plotting.  Default: 0.1.
+    bandwidth : float, optional
+        KDE bandwidth (larger = smoother background).  Default: 1.
+    max_alpha : float, optional
+        Maximum opacity for the densest KDE region.  Default: 0.65.
+    grid_size : int, optional
+        Resolution of the background colour grid.  Default: 400.
+    beta : float, optional
+        Softmax sharpening parameter for Radviz coordinate computation.
+        Higher values pull points closer to their dominant anchor.  Default: 10.
+    jitter_strength : float, optional
+        Standard deviation of Gaussian jitter applied to overlapping points.
+        Default: 0.05.
+    eps : float, optional
+        Radius within which two points are considered overlapping.  Default: 0.02.
+    pad : float, optional
+        Grid extent padding beyond the unit circle.  Default: 1.1.
+    s_scale : float, optional
+        Scalar multiplier for point sizes (``s_scale * gene_strength``).
+        Default: 100.
+    radius_threshold : float, optional
+        Points with radius <= this value are assigned to the ``'None'`` group.
+        Default: 0.25.
+    class_colors_hex : list of str, optional
+        Hex colour codes for each group, e.g. ``['#FF6666', '#3399FF']``.
+        If ``None``, colours are drawn from the ``'rainbow'`` colormap.
+    annotate : bool, optional
+        If ``True``, gene names are annotated on the plot.  Default: False.
+    annotation_radius : float, optional
+        Only annotate genes whose radius exceeds this value.  Default: 0.75.
+    annotation_size : float, optional
+        Only annotate genes whose strength (``s``) exceeds this value.
+        If ``None``, no size filter is applied.
+    annotation_fontsize : int, optional
+        Font size for gene annotations.  Default: 9.
+    return_genes : bool, optional
+        If ``True``, return the gene-coordinate DataFrame.  Default: False.
+    ax : matplotlib.axes.Axes, optional
+        Axes to draw on.  A new figure is created when ``None``.
+    show : bool, optional
+        If ``True``, call ``plt.show()`` before returning.  Default: True.
+
+    Returns
+    -------
+    coords : pd.DataFrame
+        Returned only when ``return_genes=True``.  Columns: ``x``, ``y``,
+        ``s``, ``x_jitter``, ``y_jitter``, ``assigned_group``, ``radius``.
+    ax : matplotlib.axes.Axes
+        Returned only when ``ax`` is provided and ``return_genes=False``.
     """
     df = df_profile.copy()
     # ---------------- Default Colors ----------------
@@ -248,10 +287,8 @@ def radviz(df_profile, cell_types = None, group_mapping = None, fraction_thresho
     if show:
         plt.show()
 
-    if ax is not None:
-        if return_genes:
-            return ax_, coords
-        return ax_
-    plt.close()
     if return_genes:
         return coords
+    if ax is not None:
+        return ax_
+    plt.close()

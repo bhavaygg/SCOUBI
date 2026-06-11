@@ -28,7 +28,40 @@ def get_whisper_edges(Z_1, Z_2, x_a, x_b, device):
     X = (Z_1 * x_a) * agg_Z_2_x_b
     return X
 
-def run_cw_regionwise(adata: ad.AnnData, threshold = None, zscore_threshold = 3, cw_edges_threshold = 30, device = 'cpu'):
+def run_cw_regionwise(adata: ad.AnnData, threshold=None, zscore_threshold=3, cw_edges_threshold=30, device='cpu'):
+    """
+    Run the CellWhisper communication analysis independently for each anatomical region.
+
+    Assigns every spatial pixel to its nearest cell's region label (Voronoi mapping),
+    then computes per-region ligand-receptor z-scores and filters to significant pairs
+    using the same criteria as :func:`scoubi.tl.overview`.
+
+    Parameters
+    ----------
+    adata : ad.AnnData
+        Must contain ``adata.obs['region']``, ``adata.obsm['bin']``,
+        ``adata.uns['interface_map']``, ``adata.uns['bin_probabilities']``,
+        ``adata.uns['lr_pairs']``, ``adata.uns['binned_data']``,
+        ``adata.uns['binned_data_shape']``, ``adata.uns['mask_ecm']``,
+        ``adata.uns['mask_cell']``, and ``adata.uns['genes']``.
+    threshold : float, optional
+        Probability threshold for binarising axon/dendrite maps.
+        Default: ``None`` (treated as 0.5 internally).
+    zscore_threshold : float, optional
+        Minimum CellWhisper z-score to call a pair significant.  Default: 3.
+    cw_edges_threshold : float, optional
+        Minimum co-localised edge count (X) to call a pair significant.  Default: 30.
+    device : str, optional
+        Torch device string, e.g. ``'cpu'`` or ``'cuda'``.  Default: ``'cpu'``.
+
+    Returns
+    -------
+    ad.AnnData
+        The input ``adata`` updated in-place with:
+
+        * ``uns['cellwhisper_regionwise']`` – dict mapping region name to a DataFrame
+          of significant LR pairs (columns: L, R, zscore, N, X, p_a, p_d, X_neighboring)
+    """
     array_usr = (adata.uns['binned_data'].toarray().reshape(adata.uns['binned_data_shape']) * adata.uns["mask_ecm"][:, :, None]).copy()
     pairs = adata.uns['lr_pairs'] 
     genes = adata.uns['genes']
