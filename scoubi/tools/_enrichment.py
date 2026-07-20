@@ -4,13 +4,9 @@ import pandas as pd
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
-import matplotlib.cm as cm
 from scipy import stats
-from ..model import get_zscore, do_conv, _prep_dict, kernel
-import pickle
-from ..plotting import size_mapping, categorize_gene
-from statsmodels.stats.proportion import proportions_ztest
 from statsmodels.stats.multitest import multipletests
+from ._sparse import binary_sparse_matrix, masked_binned_matrix, sparse_sum
 
 datasets = {"BP": "GO:0008150", "CC": "GO:0005575", "MF": "GO:0003674"}
 
@@ -74,8 +70,10 @@ def axon_dendrite_enrichment(
     z_thr: float = 5.0,
 ) -> ad.AnnData:
     """
-    Compute axon-vs-dendrite proportions z-test, compartment specificity
-    DataFrames, and derived enrichment statistics.
+    Compute axon-vs-dendrite proportions z-test and compartment specificity.
+
+    The calculation uses sparse reductions over ``uns['binned_data']`` and does
+    not construct a dense ``(x_bins, y_bins, n_genes)`` expression cube.
 
     The function does the following in one pass:
 
@@ -115,21 +113,16 @@ def axon_dendrite_enrichment(
     """
     from scipy.stats import norm as _norm
 
-    array_usr = (
-        adata.uns['binned_data']
-        .toarray()
-        .reshape(adata.uns['binned_data_shape'])
-        * adata.uns['mask_ecm'][:, :, None]
-    )
-
     axon_map     = adata.uns['axon_map']
     dendrite_map = adata.uns['dendrite_map']
     genes        = list(adata.uns['genes'])
+    X = masked_binned_matrix(adata)
+    X_binary = binary_sparse_matrix(X)
 
     # --- expression sums per compartment ------------------------------------
-    total_expr = array_usr.sum(axis=(0, 1))  # (G,)
-    axon_expr = (array_usr[axon_map == 1] > 0).sum(axis=0).astype(float)
-    dendrite_expr = (array_usr[dendrite_map == 1] > 0).sum(axis=0).astype(float)
+    total_expr = sparse_sum(X)  # (G,)
+    axon_expr = sparse_sum(X_binary, axon_map.reshape(-1) == 1).astype(float)
+    dendrite_expr = sparse_sum(X_binary, dendrite_map.reshape(-1) == 1).astype(float)
 
     n1 = int((axon_map == 1).sum())      # total axon bins
     n2 = int((dendrite_map == 1).sum())  # total dendrite bins

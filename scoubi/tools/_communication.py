@@ -2,10 +2,12 @@ import numpy as np
 import anndata as ad
 import pandas as pd
 import torch
-from ..model import do_conv, _prep_dict, kernel
+from ..model import do_conv, kernel
 from scipy.spatial import cKDTree
+from ._sparse import prep_x_bin_from_binned
 
 def run_cellwhisper(Z_1, Z_2, x_a, x_b, device, eps = 1e-30):
+    """Compute CellWhisper z-score and neighboring-expression count."""
     agg_Z_2 = do_conv(Z_2, kernel=kernel.to(device))
     agg_Z_2_x_b = do_conv(Z_2 * x_b, kernel=kernel.to(device))
     X_raw = torch.sum(x_a * do_conv(x_b, kernel=kernel.to(device)))
@@ -24,6 +26,7 @@ def run_cellwhisper(Z_1, Z_2, x_a, x_b, device, eps = 1e-30):
     return z_score.item(), N.item(), X.item(), p_a.item(), p_d.item(), X_raw.item()
 
 def get_whisper_edges(Z_1, Z_2, x_a, x_b, device):
+    """Return the spatial edge-intensity map for one directed LR pair."""
     agg_Z_2_x_b = do_conv(Z_2 * x_b, kernel=kernel.to(device))
     X = (Z_1 * x_a) * agg_Z_2_x_b
     return X
@@ -34,7 +37,8 @@ def run_cw_regionwise(adata: ad.AnnData, threshold=None, zscore_threshold=3, cw_
 
     Assigns every spatial pixel to its nearest cell's region label (Voronoi mapping),
     then computes per-region ligand-receptor z-scores and filters to significant pairs
-    using the same criteria as :func:`scoubi.tl.overview`.
+    using the same criteria as :func:`scoubi.tl.overview`. Only ligand-receptor
+    gene maps are extracted from the sparse binned matrix.
 
     Parameters
     ----------
@@ -62,9 +66,9 @@ def run_cw_regionwise(adata: ad.AnnData, threshold=None, zscore_threshold=3, cw_
         * ``uns['cellwhisper_regionwise']`` – dict mapping region name to a DataFrame
           of significant LR pairs (columns: L, R, zscore, N, X, p_a, p_d, X_neighboring)
     """
-    array_usr = (adata.uns['binned_data'].toarray().reshape(adata.uns['binned_data_shape']) * adata.uns["mask_ecm"][:, :, None]).copy()
     pairs = adata.uns['lr_pairs'] 
     genes = adata.uns['genes']
+    x_bin, x_shape, gene_to_idx = prep_x_bin_from_binned(adata, pairs, genes, device)
     ad_map = torch.from_numpy(adata.uns['bin_probabilities'].copy()).float().to(device)
     binary_matrix_ecm = torch.from_numpy(adata.uns['mask_ecm'].copy()).float().to(device)
     binary_matrix_cell = torch.from_numpy(adata.uns['mask_cell'].copy()).float().to(device)
@@ -82,28 +86,21 @@ def run_cw_regionwise(adata: ad.AnnData, threshold=None, zscore_threshold=3, cw_
         dists = dists[:, np.newaxis]
         idxs = idxs[:, np.newaxis]
     regions = adata.obs['region'].to_numpy(dtype=object)
-    unique_types = np.unique(regions)
-    inverted_dict = {t: [] for t in unique_types}
-    for i, bins in enumerate(idxs):
-        closest_types = regions[bins]
-        for t in closest_types:
-            inverted_dict[t].append(tuple(target_coords_xy[i]))
+    pixel_regions = regions[idxs[:, 0]]
     region_wise_results = {}
     for region in np.unique(regions):
         print(region)
-        temp = np.zeros_like(adata.uns['interface_map'])
-        coords = np.array(inverted_dict[region])
-        x, y = coords[:, 0], coords[:, 1]
-        temp[x, y] = 1
-        array_usr_temp = array_usr.copy() * temp[:, :, np.newaxis]
-        x_bin, x_shape, gene_to_idx = _prep_dict(array_usr_temp, pairs, genes, device)
+        temp = (pixel_regions == region).reshape(adata.uns['interface_map'].shape)
+        if not np.any(temp):
+            continue
+        temp = temp.astype(np.float32)
         temp = torch.from_numpy(temp).float().to(device)
         ad_map_region = ad_map.clone()
         rows = []
         for gp in pairs:
             a_idx, b_idx = gene_to_idx.get(gp[0]), gene_to_idx.get(gp[1])
             if a_idx is None or b_idx is None or a_idx not in x_bin or b_idx not in x_bin: continue
-            x_a, x_b = x_bin[a_idx], x_bin[b_idx]
+            x_a, x_b = x_bin[a_idx] * temp, x_bin[b_idx] * temp
             zscore, N, X, p_a, p_d, X_raw = run_cellwhisper(ad_map_region[:, 0].reshape(binary_matrix_ecm.shape) * temp , ad_map_region[:, 1].reshape(binary_matrix_ecm.shape) * temp, x_a, x_b, device)
             rows.append([gp[0], gp[1], zscore, N, X, p_a, p_d, X_raw])
         df_cw = pd.DataFrame(rows, columns = ['L', 'R', 'zscore', 'N', 'X', 'p_a', 'p_d', 'X_neighboring'])

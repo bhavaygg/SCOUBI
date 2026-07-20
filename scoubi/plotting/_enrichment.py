@@ -7,6 +7,7 @@ import matplotlib.ticker as ticker
 from adjustText import adjust_text
 
 def categorize_gene(row, lfc_threshold, pval_threshold):
+    """Classify a differential-expression row by log fold change and adjusted p-value."""
     if abs(row['logfoldchanges']) > lfc_threshold and row['pvals_adj'] < pval_threshold:
         return 'Upregulated' if row['logfoldchanges'] > lfc_threshold else 'Downregulated'
     else:

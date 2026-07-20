@@ -53,7 +53,7 @@ def _summarize(self):
     group_map = {
         'data': [
             'transcripts_path', 'usr_label', 'data_shape', 'binned_data_shape',
-            'mask_cell', 'mask_ecm', 'binned_data',
+            'mask_cell', 'mask_ecm', 'binned_data', 'binned_data_3d',
             'axon_markers', 'dendrite_markers', 'genes', 'lr_pairs'
         ],
         'annotations': ['bin_probabilities', 'bin_scores'],

@@ -3,6 +3,13 @@ import anndata as ad
 import pandas as pd
 from scipy.spatial import cKDTree
 from scipy.stats import norm
+from ._sparse import (
+    binary_sparse_matrix,
+    cell_gt_quantile_binary,
+    masked_binned_matrix,
+    sparse_sum,
+    spatial_shape,
+)
 
 
 def _prop_ztest_vec(
@@ -58,6 +65,9 @@ def p_test(
     Region-wise proportions z-test comparing gene expression across three
     compartments: cells, interface bins, and extrasomatic background (ESB)
     bins.
+
+    Spatial bin counts are computed from sparse all-gene matrices, preserving
+    the full gene set without materializing a dense spatial expression cube.
 
     For every (region, gene) pair the function tests whether the proportion
     of expressing units (cells, interface bins, or ESB bins) assigned to a
@@ -161,24 +171,16 @@ def p_test(
     coarse = np.where(is_neuron, 'Neuronal', 'Non-neuronal')
 
     # ------------------------------------------------------------------
-    # 3. Build spatial expression arrays
+    # 3. Build flattened sparse spatial expression
     # ------------------------------------------------------------------
-    array_usr = (
-        adata.uns['binned_data']
-        .toarray()
-        .reshape(adata.uns['binned_data_shape'])
-        * adata.uns['mask_ecm'][:, :, None]
-    ).copy()
-
-    H, W, G = array_usr.shape
-    flat_expr = array_usr.reshape(-1, G)
+    X = masked_binned_matrix(adata)
+    bin_binary = binary_sparse_matrix(X)
+    H, W = spatial_shape(adata)
+    G = X.shape[1]
 
     flat_syn     = adata.uns[interface_key].reshape(-1).astype(bool)
     flat_ecm     = adata.uns['mask_ecm'].reshape(-1).astype(bool)
-    flat_nonzero = flat_expr.sum(axis=1) > 0
-
-    # Binary presence per bin per gene
-    bin_binary = flat_expr > 0   # (N_bins, G) bool
+    flat_nonzero = np.asarray(X.sum(axis=1)).ravel() > 0
 
     # ESB pool: ECM, not interface, non-zero total expression
     esb_pool = flat_ecm & ~flat_syn & flat_nonzero
@@ -192,19 +194,12 @@ def p_test(
 
     regions_obs    = adata.obs[region_key].values
     unique_regions = np.unique(regions_obs)
-
-    # build region -> list-of-coords mapping
-    inverted_dict = {r: [] for r in unique_regions}
-    for pixel_i, (row, col) in enumerate(all_coords):
-        label = regions_obs[cell_idxs[pixel_i]]
-        inverted_dict[label].append((row, col))
+    pixel_regions = regions_obs[cell_idxs]
 
     # ------------------------------------------------------------------
     # 5. Cell-level binary expression (above 75th percentile)
     # ------------------------------------------------------------------
-    cellular_exp  = adata.to_df()
-    gene_thresh   = cellular_exp.quantile(0.75, axis=0)
-    cell_bin_mat  = cellular_exp.gt(gene_thresh)[adata.uns['genes']].values  # (n_cells, G)
+    cell_bin_mat = cell_gt_quantile_binary(adata, list(adata.uns['genes']))
 
     genes_arr = np.asarray(adata.uns['genes'])
 
@@ -228,14 +223,9 @@ def p_test(
         if n_r == 0 or n_o == 0:
             continue
 
-        coords = inverted_dict.get(region, [])
-        if len(coords) == 0:
+        flat_reg = pixel_regions == region
+        if not np.any(flat_reg):
             continue
-
-        coords    = np.asarray(coords)
-        region_2d = np.zeros((H, W), dtype=bool)
-        region_2d[coords[:, 0], coords[:, 1]] = True
-        flat_reg  = region_2d.reshape(-1)
 
         # -- interface sub-masks --
         iA = flat_reg  & flat_syn
@@ -248,12 +238,12 @@ def p_test(
         nA_e = int(eA.sum()); nB_e = int(eB.sum())
 
         # ---- cell-level counts per gene ----
-        k_r  = cell_bin_mat[r_mask].sum(axis=0)
-        k_o  = cell_bin_mat[o_mask].sum(axis=0)
-        k_rn = cell_bin_mat[rn_mask].sum(axis=0)
-        k_on = cell_bin_mat[on_mask].sum(axis=0)
-        k_rg = cell_bin_mat[rg_mask].sum(axis=0)
-        k_og = cell_bin_mat[og_mask].sum(axis=0)
+        k_r  = sparse_sum(cell_bin_mat, r_mask)
+        k_o  = sparse_sum(cell_bin_mat, o_mask)
+        k_rn = sparse_sum(cell_bin_mat, rn_mask)
+        k_on = sparse_sum(cell_bin_mat, on_mask)
+        k_rg = sparse_sum(cell_bin_mat, rg_mask)
+        k_og = sparse_sum(cell_bin_mat, og_mask)
 
         z_cell, p_cell = _prop_ztest_vec(k_r,  k_o,  n_r,  n_o)
         z_cn,   p_cn   = _prop_ztest_vec(k_rn, k_on, n_rn, n_on)
@@ -261,8 +251,8 @@ def p_test(
 
         # ---- interface bin counts per gene ----
         if nA_i > 0 and nB_i > 0:
-            ki_A = bin_binary[iA].sum(axis=0)
-            ki_B = bin_binary[iB].sum(axis=0)
+            ki_A = sparse_sum(bin_binary, iA)
+            ki_B = sparse_sum(bin_binary, iB)
             z_interface, p_interface = _prop_ztest_vec(ki_A, ki_B, nA_i, nB_i)
         else:
             ki_A = ki_B = np.zeros(G, dtype=int)
@@ -273,8 +263,8 @@ def p_test(
 
         # ---- ESB bin counts per gene ----
         if nA_e > 0 and nB_e > 0:
-            ke_A = bin_binary[eA].sum(axis=0)
-            ke_B = bin_binary[eB].sum(axis=0)
+            ke_A = sparse_sum(bin_binary, eA)
+            ke_B = sparse_sum(bin_binary, eB)
             z_esb, p_esb = _prop_ztest_vec(ke_A, ke_B, nA_e, nB_e)
         else:
             ke_A = ke_B = np.zeros(G, dtype=int)

@@ -1,6 +1,7 @@
 import numpy as np
 import anndata as ad
 import pandas as pd
+from ._sparse import masked_binned_matrix, sparse_mean
 
 
 def empirical_background(
@@ -13,6 +14,10 @@ def empirical_background(
     """
     Build an empirical null distribution from library-size-matched background
     (extrasomatic) bins and compare interface bin expression against it.
+
+    Interface and background means are computed from the sparse flattened
+    bin-by-gene matrix, so all genes are retained without materializing the
+    full spatial dense cube.
 
     Background bins are defined as bins that fall within the ECM mask
     (``mask_ecm``), are **not** part of the interface (``interface_key``),
@@ -61,26 +66,19 @@ def empirical_background(
     """
     rng = np.random.default_rng(random_seed)
 
-    array_usr = (
-        adata.uns['binned_data']
-        .toarray()
-        .reshape(adata.uns['binned_data_shape'])
-        * adata.uns['mask_ecm'][:, :, None]
-    ).copy()
-
-    H, W, G = array_usr.shape
-    flat_expr = array_usr.reshape(-1, G)
+    X = masked_binned_matrix(adata)
+    G = X.shape[1]
 
     flat_syn = adata.uns[interface_key].reshape(-1).astype(bool)
     flat_ecm = adata.uns['mask_ecm'].reshape(-1).astype(bool)
-    flat_nonzero = flat_expr.sum(axis=1) > 0
+    libsize = np.asarray(X.sum(axis=1)).ravel()
+    flat_nonzero = libsize > 0
 
     # Interface (A) group
     A_mask = flat_syn
-    A_mean = flat_expr[A_mask].mean(axis=0)
+    A_mean = sparse_mean(X, A_mask)
 
     # Library sizes
-    libsize = flat_expr.sum(axis=1)
     libsize_A = libsize[A_mask]
 
     # Background pool: ECM bins, not interface, with non-zero expression
@@ -108,7 +106,7 @@ def empirical_background(
         if len(sampled_idx) == 0:
             continue
         sampled_idx = np.concatenate(sampled_idx)
-        C_boot[b] = flat_expr[sampled_idx].mean(axis=0)
+        C_boot[b] = sparse_mean(X, sampled_idx)
 
     C_mean = C_boot.mean(axis=0)
     sd_C = C_boot.std(axis=0, ddof=1)

@@ -1,4 +1,3 @@
-import pandas as pd
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -7,7 +6,7 @@ import torch.optim as optim
 import pickle
 import random
 from importlib import resources
-from tqdm import trange, tqdm
+from tqdm import trange
 
 def set_seed(seed_value):
     """Sets the seed for reproducibility."""
@@ -24,6 +23,8 @@ def set_seed(seed_value):
 kernel = torch.tensor([[1., 1., 1.],[1., 0., 1.],[1., 1., 1.]]).unsqueeze(0).unsqueeze(0)
 
 class BinAnnotator(nn.Module):
+    """Linear marker model that scores bins for each neurite compartment."""
+
     def __init__(self, input_dims):
         super().__init__()
         self.fcs = nn.ModuleList([nn.Linear(d, 1, bias=False) for d in input_dims])
@@ -41,6 +42,7 @@ class BinAnnotator(nn.Module):
         return out
     
 def tstat_loss(X, P, eps=1e-8):
+    """Return the negative two-group t-statistic objective for marker expression."""
     p1 = P.unsqueeze(1)
     p2 = 1 - P.unsqueeze(1)
     n1 = p1.sum()
@@ -53,6 +55,7 @@ def tstat_loss(X, P, eps=1e-8):
     return -t_stat.mean()
 
 def do_conv(matrix, kernel=None):
+    """Apply a same-size 2-D convolution to one spatial map."""
     return F.conv2d(matrix[None, None, :, :], kernel, padding='same')[0, 0]
 
 def precompute_zscore_shared(Z_1, Z_2, kernel, eps=1e-30):
@@ -84,8 +87,93 @@ def get_zscore_pair(Z_1, Z_2, x_a, x_b, kernel,
 
 
 def get_zscore(Z_1, Z_2, x_a, x_b, kernel, eps=1e-30, iid=True):
+    """Compute one ligand-receptor communication z-score."""
     shared = precompute_zscore_shared(Z_1, Z_2, kernel, eps)
     return get_zscore_pair(Z_1, Z_2, x_a, x_b, kernel, *shared, eps=eps, iid=iid)
+
+
+def get_zscore_pairs_batched(
+    Z_1,
+    Z_2,
+    x_bin,
+    pairs,
+    gene_to_idx,
+    kernel,
+    shared=None,
+    eps=1e-30,
+    iid=True,
+    receptor_batch_size=32,
+):
+    """
+    Compute z-scores for many LR pairs while preserving get_zscore_pair behavior.
+
+    This avoids repeating the expensive ``conv(Z_2 * x_b)`` operation for every
+    pair by batching unique receptor genes. Pair order and skipped-pair behavior
+    match the current training loop: only pairs with both genes present in
+    ``x_bin`` are returned.
+    """
+    if shared is None:
+        shared = precompute_zscore_shared(Z_1, Z_2, kernel, eps)
+    _, Z_prod, N, Z_prod_sq_sum, Z_1_sum, Z_2_sum = shared
+    z_device = Z_1.device
+    z_dtype = Z_1.dtype
+    expr_cache = {}
+
+    def _expr(g_idx):
+        expr = expr_cache.get(g_idx)
+        if expr is None:
+            expr = x_bin[g_idx].to(device=z_device, dtype=z_dtype, non_blocking=True)
+            expr_cache[g_idx] = expr
+        return expr
+
+    valid_pairs = []
+    receptor_indices = []
+    for gp in pairs:
+        a_idx, b_idx = gene_to_idx.get(gp[0]), gene_to_idx.get(gp[1])
+        if a_idx is None or b_idx is None or a_idx not in x_bin or b_idx not in x_bin:
+            continue
+        valid_pairs.append((gp, a_idx, b_idx))
+        if b_idx not in receptor_indices:
+            receptor_indices.append(b_idx)
+
+    if not valid_pairs:
+        return torch.empty(0, dtype=Z_1.dtype, device=Z_1.device), []
+
+    ligand_prob = {}
+    receptor_prob = {}
+    for _, a_idx, b_idx in valid_pairs:
+        if a_idx not in ligand_prob:
+            ligand_prob[a_idx] = torch.sum(_expr(a_idx) * Z_1) / (Z_1_sum + eps)
+        if b_idx not in receptor_prob:
+            receptor_prob[b_idx] = torch.sum(_expr(b_idx) * Z_2) / (Z_2_sum + eps)
+
+    pairs_by_receptor = {b_idx: [] for b_idx in receptor_indices}
+    for pair_pos, (_, a_idx, b_idx) in enumerate(valid_pairs):
+        pairs_by_receptor[b_idx].append((pair_pos, a_idx))
+
+    zscores = [None] * len(valid_pairs)
+    receptor_batch_size = max(1, int(receptor_batch_size))
+    for start in range(0, len(receptor_indices), receptor_batch_size):
+        receptor_chunk = receptor_indices[start:start + receptor_batch_size]
+        receptor_stack = torch.stack([Z_2 * _expr(b_idx) for b_idx in receptor_chunk])
+        agg_chunk = F.conv2d(receptor_stack[:, None, :, :], kernel, padding='same')[:, 0, :, :]
+
+        for chunk_pos, b_idx in enumerate(receptor_chunk):
+            agg_Z_2_x_b = agg_chunk[chunk_pos]
+            p_d = receptor_prob[b_idx]
+            for pair_pos, a_idx in pairs_by_receptor[b_idx]:
+                p_a = ligand_prob[a_idx]
+                X = torch.sum((Z_1 * _expr(a_idx)) * agg_Z_2_x_b)
+                E_x = N * p_a * p_d
+                if iid:
+                    var_X = torch.clamp(E_x * (1 - p_a * p_d), min=eps)
+                else:
+                    E_x_2 = Z_prod_sq_sum * (p_a * p_d) ** 2 + (N ** 2 - Z_prod_sq_sum) * (p_a * p_d) ** 2
+                    var_X = torch.clamp(E_x + E_x_2 - E_x ** 2, min=eps)
+                zscores[pair_pos] = (X - E_x) / torch.sqrt(var_X)
+
+    return torch.stack(zscores), [gp for gp, _, _ in valid_pairs]
+
 
 def _prep_dict(array_usr, pairs, genes, device):
     x_bin = {}
@@ -98,7 +186,48 @@ def _prep_dict(array_usr, pairs, genes, device):
                 x_bin[g_idx] = torch.from_numpy(array_usr[:, :, g_idx]).float().to(device)
     return x_bin, x_shape, gene_to_idx
 
-def train(adata, axon_markers, dendrite_markers, pairs = None, epochs = 500, lambda_gex = 1e-1, lambda_comm = 1, ftemp = 1e-1, patience = 50, lr = 1e-3, device='cpu', weight_decay=1e-4, seed = 42, tol = 1e-2, do_comm = True, iid=True):
+
+def _gene_tensor_from_binned(binned_data, x_shape, gene_idx, mask_ecm):
+    gene_map = binned_data[:, gene_idx].toarray().reshape(x_shape).astype(np.float32, copy=False)
+    gene_map = gene_map * mask_ecm
+    return torch.from_numpy(gene_map).float()
+
+
+def _clone_state_dict(state_dict):
+    return {k: v.detach().clone() for k, v in state_dict.items()}
+
+
+def _prep_training_tensors(adata, pairs, genes, ct_genes_idx, device):
+    x_shape = tuple(adata.uns['binned_data_shape'][:2])
+    binned_data = adata.uns['binned_data'].tocsc()
+    mask_ecm = adata.uns['mask_ecm'].astype(np.float32, copy=False)
+    gene_to_idx = {gene: i for i, gene in enumerate(genes)}
+
+    required_idx = set(ct_genes_idx)
+    for gp in pairs:
+        for gene_name in gp:
+            g_idx = gene_to_idx.get(gene_name)
+            if g_idx is not None:
+                required_idx.add(g_idx)
+
+    tensor_cache = {
+        g_idx: _gene_tensor_from_binned(binned_data, x_shape, g_idx, mask_ecm).to(
+            device=device,
+            non_blocking=True,
+        )
+        for g_idx in sorted(required_idx)
+    }
+    x_bin = {
+        g_idx: tensor_cache[g_idx]
+        for gp in pairs
+        for gene_name in gp
+        for g_idx in [gene_to_idx.get(gene_name)]
+        if g_idx is not None and g_idx in tensor_cache
+    }
+    return tensor_cache, x_bin, x_shape, gene_to_idx
+
+
+def train(adata, axon_markers, dendrite_markers, pairs = None, epochs = 500, lambda_gex = 1e-1, lambda_comm = 1, ftemp = 1e-1, patience = 50, lr = 1e-3, device='cpu', weight_decay=1e-4, seed = 42, tol = 1e-2, do_comm = True, iid=True, zscore_backend="batched", zscore_batch_size=32):
     """Train the BinAnnotator model to assign spatial bins to axon or dendrite identity.
 
     Optimizes a joint loss combining a GEX alignment term (t-statistic between
@@ -110,7 +239,9 @@ def train(adata, axon_markers, dendrite_markers, pairs = None, epochs = 500, lam
     adata : AnnData
         Spatial transcriptomics object. Must contain ``adata.uns['binned_data']``,
         ``adata.uns['binned_data_shape']``, ``adata.uns['mask_ecm']``, and
-        ``adata.uns['genes']``.
+        ``adata.uns['genes']``. Training extracts only marker and ligand-receptor
+        gene maps from the sparse binned matrix; it does not materialize the full
+        dense ``(x_bins, y_bins, n_genes)`` cube.
     axon_markers : list of str
         Gene names used as axon compartment markers.
     dendrite_markers : list of str
@@ -132,7 +263,8 @@ def train(adata, axon_markers, dendrite_markers, pairs = None, epochs = 500, lam
     lr : float, optional
         AdamW learning rate (default 1e-3).
     device : str, optional
-        Torch device string, e.g. ``'cpu'`` or ``'cuda'`` (default ``'cpu'``).
+        Torch device string, e.g. ``'cpu'`` or ``'cuda'``. Selected training
+        tensors and the model are moved to this device. Default: ``'cpu'``.
     weight_decay : float, optional
         AdamW weight decay (default 1e-4).
     seed : int, optional
@@ -146,7 +278,14 @@ def train(adata, axon_markers, dendrite_markers, pairs = None, epochs = 500, lam
         Variance model for the communication z-score. ``True`` (default) uses
         the fast closed-form ``var = E[X] * (1 - p_a * p_d)``; ``False`` uses
         the full spatial covariance formula.
-
+    zscore_backend : {"loop", "batched"}, optional
+        Communication z-score execution backend. ``"batched"`` uses the same
+        formula as the original path but batches repeated receptor-gene
+        convolutions. Use ``"loop"`` to run the original per-pair convolution
+        path. Default: ``"batched"``.
+    zscore_batch_size : int, optional
+        Number of unique receptor genes to convolve at once when
+        ``zscore_backend="batched"``. Default: 32.
     Returns
     -------
     AnnData
@@ -161,11 +300,11 @@ def train(adata, axon_markers, dendrite_markers, pairs = None, epochs = 500, lam
             pairs = pickle.load(fp)
     genes = list(adata.uns['genes'])
     pairs = [pair for pair in pairs if pair[0] in genes and pair[1] in genes]
-    array_usr = (adata.uns['binned_data'].toarray().reshape(adata.uns['binned_data_shape']) * adata.uns["mask_ecm"][:, :, None]).copy()
     axon_markers = [gene for gene in axon_markers if gene in genes]
     dendrite_markers = [gene for gene in dendrite_markers if gene in genes]
-    axon_idx = [genes.index(gene) for gene in axon_markers]
-    dendrite_idx = [genes.index(gene) for gene in dendrite_markers]
+    print(f"Using {len(axon_markers)} axon markers: {axon_markers}")
+    print(f"Using {len(dendrite_markers)} dendrite markers: {dendrite_markers}")
+    print(f"Using {len(pairs)} ligand-receptor pairs.")
 
     taxon_markers = {"Axon": axon_markers, "Dendrite": dendrite_markers}
     num_cts = len(taxon_markers)
@@ -176,12 +315,21 @@ def train(adata, axon_markers, dendrite_markers, pairs = None, epochs = 500, lam
         len_idx.append(len(taxon_markers[ct]))
         for gene in taxon_markers[ct]:
             ct_genes_idx.append(genes.index(gene))
-    
-    x_all = torch.from_numpy(array_usr[:, :, ct_genes_idx]).float().flatten(0, 1).to(device)
-    x_mask = (x_all.sum(axis = 1) != 0).unsqueeze(1).float().clone()
-    ct_markers_gex = {ct: torch.from_numpy(array_usr[:, :, [genes.index(x) for x in taxon_markers[ct]]]).float().flatten(0, 1).to(device) for ct in selected_cts}
 
-    x_bin, x_shape, gene_to_idx = _prep_dict(array_usr, pairs, genes, device)
+    tensor_cache, x_bin, x_shape, gene_to_idx = _prep_training_tensors(
+        adata, pairs, genes, ct_genes_idx, device
+    )
+
+    x_all = torch.stack(
+        [tensor_cache[g_idx].to(device=device, non_blocking=True) for g_idx in ct_genes_idx],
+        dim=-1,
+    ).flatten(0, 1)
+    x_mask = (x_all.sum(axis = 1) != 0).unsqueeze(1).float().clone()
+    ct_markers_gex = {}
+    start = 0
+    for ct, width in zip(selected_cts, len_idx):
+        ct_markers_gex[ct] = x_all[:, start:start + width]
+        start += width
     
     model = BinAnnotator(input_dims=len_idx).to(device)
     optimizer = optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
@@ -210,18 +358,44 @@ def train(adata, axon_markers, dendrite_markers, pairs = None, epochs = 500, lam
         ct_loss_for_n1 = 0.0
         if do_comm:
             shared = precompute_zscore_shared(Z_a, Z_d, kernel_dev)
-            for gp in pairs:
-                a_idx, b_idx = gene_to_idx.get(gp[0]), gene_to_idx.get(gp[1])
-                if a_idx is None or b_idx is None or a_idx not in x_bin or b_idx not in x_bin:
-                    continue
-                x_a, x_b = x_bin[a_idx], x_bin[b_idx]
-                ct_loss_for_n1 -= get_zscore_pair(Z_a, Z_d, x_a, x_b, kernel_dev, *shared, iid=iid)
+            if zscore_backend == "loop":
+                epoch_expr_cache = {}
+                def _epoch_expr(g_idx):
+                    expr = epoch_expr_cache.get(g_idx)
+                    if expr is None:
+                        expr = x_bin[g_idx].to(device=Z_a.device, dtype=Z_a.dtype, non_blocking=True)
+                        epoch_expr_cache[g_idx] = expr
+                    return expr
 
-        total_loss = gex_loss_term + (lambda_comm * ct_loss_for_n1 / len(pairs))
+                for gp in pairs:
+                    a_idx, b_idx = gene_to_idx.get(gp[0]), gene_to_idx.get(gp[1])
+                    if a_idx is None or b_idx is None or a_idx not in x_bin or b_idx not in x_bin:
+                        continue
+                    x_a = _epoch_expr(a_idx)
+                    x_b = _epoch_expr(b_idx)
+                    ct_loss_for_n1 -= get_zscore_pair(Z_a, Z_d, x_a, x_b, kernel_dev, *shared, iid=iid)
+            elif zscore_backend == "batched":
+                zscores, _ = get_zscore_pairs_batched(
+                    Z_a,
+                    Z_d,
+                    x_bin,
+                    pairs,
+                    gene_to_idx,
+                    kernel_dev,
+                    shared=shared,
+                    iid=iid,
+                    receptor_batch_size=zscore_batch_size,
+                )
+                ct_loss_for_n1 = -torch.sum(zscores) if zscores.numel() else torch.zeros((), dtype=Z_a.dtype, device=Z_a.device)
+            else:
+                raise ValueError("zscore_backend must be 'loop' or 'batched'")
+
+        comm_denominator = len(pairs) if len(pairs) else 1
+        total_loss = gex_loss_term + (lambda_comm * ct_loss_for_n1 / comm_denominator)
         total_loss.backward()
         optimizer.step()
 
-        comm_term = (ct_loss_for_n1 / len(pairs)).item() if do_comm else ct_loss_for_n1
+        comm_term = (ct_loss_for_n1 / comm_denominator).item() if do_comm else ct_loss_for_n1
         pbar.set_description(
             f"Epoch {epoch+1}/{epochs} | Total: {total_loss.item():.6f} | GEX: {gex_loss_term.item():.6f} | Comm: {comm_term:.6f} | Patience: {patience_counter}/{patience}"
         )
@@ -231,14 +405,16 @@ def train(adata, axon_markers, dendrite_markers, pairs = None, epochs = 500, lam
         if current_loss < best_loss - tol:
             best_loss = current_loss
             patience_counter = 0
-            best_model_weights = model.state_dict()
+            best_model_weights = _clone_state_dict(model.state_dict())
         else:
             patience_counter += 1
             if patience_counter >= patience:
                 print(f"\nEarly stopping at epoch {epoch}. Loss did not improve for {patience} epochs.")
                 break
 
-    if best_model_weights:
+    if best_model_weights is None:
+        best_model_weights = _clone_state_dict(model.state_dict())
+    else:
         model.load_state_dict(best_model_weights)
     adata.uns["model_weights"] = {k: v.cpu().numpy() for k, v in best_model_weights.items()}
     model.eval()
@@ -251,4 +427,3 @@ def train(adata, axon_markers, dendrite_markers, pairs = None, epochs = 500, lam
     adata.uns['dendrite_markers'] = dendrite_markers
     adata.uns['bin_scores'] = Z_score
     return adata 
-

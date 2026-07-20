@@ -1,23 +1,31 @@
 import numpy as np
 import pandas as pd
 import torch
-from ..model import do_conv, _prep_dict, kernel
+from ..model import do_conv, kernel
 from scipy.spatial import cKDTree
+from ._sparse import (
+    binary_sparse_matrix,
+    masked_binned_matrix,
+    prep_x_bin_from_binned,
+    sparse_mean,
+    spatial_shape,
+)
 
 def get_whisper_edges(Z_1, Z_2, x_a, x_b, device):
+    """Return the spatial edge-intensity map for one directed LR pair."""
     agg_Z_2_x_b = do_conv(Z_2 * x_b, kernel=kernel.to(device))
     X = (Z_1 * x_a) * agg_Z_2_x_b
     return X
 
 def expression_profile(adata, key="cell_type", threshold=None, normalize=False):
     """
-    Build a gene-expression profile of interface bins grouped by a cell-level annotation.
+    Build a gene-expression profile of interface bins grouped by annotation.
 
     For each interface bin (from ``adata.uns['interface_map']``), the nearest cell is
     looked up via the pre-computed KNN index (``adata.uns['interface_knn_idx']``), and
     its annotation label is used to group bins.  The per-group mean binary (or
-    normalised) expression across genes is returned as a DataFrame and stored in
-    ``adata.uns``.
+    normalised) expression across genes is computed from the sparse binned matrix,
+    returned as a DataFrame, and stored in ``adata.uns``.
 
     Parameters
     ----------
@@ -44,8 +52,10 @@ def expression_profile(adata, key="cell_type", threshold=None, normalize=False):
 
         * ``uns[f'interface_{key}_profile']`` – DataFrame (genes × groups)
     """
-    array_usr = (adata.uns['binned_data'].toarray().reshape(adata.uns['binned_data_shape']) * adata.uns["mask_ecm"][:, :, None]).copy()
-    genes = adata.uns['genes']
+    X = masked_binned_matrix(adata)
+    X_binary = binary_sparse_matrix(X)
+    genes = list(adata.uns['genes'])
+    H, W = spatial_shape(adata)
 
     if key not in adata.obs:
         raise ValueError(f"adata.obs must contain '{key}' column for key '{key}'")
@@ -57,28 +67,24 @@ def expression_profile(adata, key="cell_type", threshold=None, normalize=False):
     knn_idx = adata.uns["interface_knn_idx"]
     for i, bins in enumerate(knn_idx):
         closest_types = cell_types[bins]
+        row, col = target_coords_xy[i]
+        flat_idx = int(row * W + col)
         for t in closest_types:
-            inverted_dict[t].append(tuple(target_coords_xy[i]))
+            inverted_dict[t].append(flat_idx)
 
     if normalize:
-        H, W, n_genes = array_usr.shape
-        global_mean = array_usr.reshape(-1, n_genes).mean(axis=0)
+        global_mean = sparse_mean(X)
         global_mean = np.where(global_mean == 0, 1.0, global_mean)
 
-    def profile_dict(coord_dict):
+    def profile_dict(bin_dict):
         result = {}
-        for t, v in coord_dict.items():
-            if len(v) == 0:
+        for t, flat_indices in bin_dict.items():
+            if len(flat_indices) == 0:
                 continue
-            rows, cols = zip(*v)
-            rows = np.array(rows)
-            cols = np.array(cols)
-            values = array_usr[rows, cols, :]  # shape (len(v), n_genes)
             if normalize:
-                result[t] = values.mean(axis=0) / global_mean
+                result[t] = sparse_mean(X, flat_indices) / global_mean
             else:
-                binary = (values > 0).astype(float)
-                result[t] = binary.mean(axis=0)
+                result[t] = sparse_mean(X_binary, flat_indices)
         return result
 
     s_dict = profile_dict(inverted_dict)
@@ -95,12 +101,13 @@ def expression_profile(adata, key="cell_type", threshold=None, normalize=False):
 
 def communication_profile(adata, key="cell_type", k=1, threshold=None, device='cpu'):
     """
-    Build a ligand-receptor communication profile grouped by a cell-level annotation.
+    Build a ligand-receptor communication profile grouped by annotation.
 
     For each significant LR pair (from ``adata.uns['cellwhisper_lr']``), computes the
     spatial edge map (axon ligand → dendrite receptor co-localisation), finds the
     midpoint of each edge, and assigns it to the nearest cell's annotation label.
-    The result is a count table of LR edges per group.
+    Only gene maps for significant LR pairs are extracted from the sparse binned
+    matrix. The result is a count table of LR edges per group.
 
     Parameters
     ----------
@@ -135,7 +142,6 @@ def communication_profile(adata, key="cell_type", k=1, threshold=None, device='c
     cell_types = adata.obs[key].to_numpy(dtype=object)
     unique_types = np.unique(cell_types)
 
-    array_usr = (adata.uns['binned_data'].toarray().reshape(adata.uns['binned_data_shape']) * adata.uns["mask_ecm"][:, :, None]).copy()
     genes = list(adata.uns['genes'])
     # # remove later
     # with open("../SCOUBI/scoubi/data/pairs.pkl", "rb") as fp:
@@ -147,11 +153,16 @@ def communication_profile(adata, key="cell_type", k=1, threshold=None, device='c
     binary_matrix_ecm = torch.from_numpy(adata.uns['mask_ecm'].copy()).float().to(device)
     binary_matrix_cell = torch.from_numpy(adata.uns['mask_cell'].copy()).float().to(device)
     binary_overlap = (binary_matrix_cell * binary_matrix_ecm).cpu().numpy()
-    x_bin, x_shape, gene_to_idx = _prep_dict(array_usr, pairs, genes, device)
     threshold = threshold if threshold is not None else 0.5
     ad_map[ad_map <= threshold] = 0
     ad_map[ad_map > threshold] = 1
     significant_lr_pairs = adata.uns['cellwhisper_lr']
+    x_bin, x_shape, gene_to_idx = prep_x_bin_from_binned(
+        adata,
+        significant_lr_pairs,
+        genes,
+        device,
+    )
     lr_edges = {}
     lr_edges_end = {}
     for gp in significant_lr_pairs:

@@ -6,7 +6,7 @@
 
 SCOUBI is a computational framework for analyzing extrasomatic transcripts in imaging-based spatial transcriptomics data. Rather than discarding unassigned RNA as background, SCOUBI uses marker-gene expression of neurites and spatial ligand–receptor colocalization to classify extrasomatic regions as axon- or dendrite-enriched and to identify putative “interfaces” enriched for intercellular signaling programs. These interfaces provide a transcriptomic window into neuronal communication sites that are typically inaccessible to cell-centric spatial analyses. By preserving anatomical context, SCOUBI enables regional and molecular characterization of putative synaptic signaling environments directly from intact tissue.
 
-**Preprint:** [add preprint link here](https://example.com/preprint)
+**Preprint:** Coming soon.
 
 ## Overview
 
@@ -77,8 +77,14 @@ adata.summarize()
 
 ## Data and Runtime Notes
 
+- `scoubi.pp.bin_data()` stores binned expression as a sparse flattened
+  bin-by-gene matrix in `adata.uns["binned_data"]` and stores the equivalent
+  3-D sparse tensor as AnnData-safe COO components in
+  `adata.uns["binned_data_3d"]`.
 - `scoubi.md.train()` can use a bundled ligand-receptor reference table (from NeuronChat) when `pairs=None`.
 - GPU acceleration is optional; most workflows can run on CPU, although training and convolution-heavy steps are faster on CUDA when available.
+- Downstream all-gene summaries use sparse reductions over the binned matrix
+  where possible, avoiding full dense `(x, y, genes)` materialization.
 
 ## Tutorial
 
@@ -90,14 +96,4 @@ Released under the MIT License. See [LICENSE](LICENSE).
 
 ## Citation
 
-> If you use SCOUBI in your work, please cite:
->
-> ```bibtex
-> @article{scoubi,
->   title = {SCOUBI: Signaling-informed Characterization of Unresolved Biological Interfaces},
->   author = {TODO},
->   journal = {TODO},
->   year = {TODO},
->   doi = {TODO}
-> }
-> ```
+Citation information will be added when the manuscript is available.

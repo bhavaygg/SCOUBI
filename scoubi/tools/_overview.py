@@ -7,9 +7,11 @@ from rich.table import Table
 from rich.panel import Panel
 import torch.nn.functional as F
 from scipy.stats import binom
-from ..model import do_conv, _prep_dict, kernel
+from ..model import do_conv, kernel
+from ._sparse import prep_x_bin_from_binned
 
 def run_cellwhisper(Z_1, Z_2, x_a, x_b, device, eps = 1e-30):
+    """Compute CellWhisper z-score and summary counts for one LR pair."""
     agg_Z_2 = do_conv(Z_2, kernel=kernel.to(device))
     agg_Z_2_x_b = do_conv(Z_2 * x_b, kernel=kernel.to(device))
     X = (Z_1 * x_a) * agg_Z_2_x_b
@@ -27,14 +29,17 @@ def run_cellwhisper(Z_1, Z_2, x_a, x_b, device, eps = 1e-30):
     return z_score.item(), N.item(), X.item(), p_a.item(), p_d.item()
 
 def get_whisper_edges(Z_1, Z_2, x_a, x_b, device):
+    """Return the spatial edge-intensity map for one directed LR pair."""
     agg_Z_2_x_b = do_conv(Z_2 * x_b, kernel=kernel.to(device))
     X = (Z_1 * x_a) * agg_Z_2_x_b
     return X
 
 def p_geq_k(p: float, k: int, n: int = 4) -> float:
+    """Return the binomial probability of observing at least ``k`` successes."""
     return 1 - binom.cdf(k - 1, n, p)
 
 def fmt(val, total_bins_val):
+    """Format a count and percentage for overview display."""
     pct = val / total_bins_val * 100
     return f"{val:,} ({pct:.1f}%)"
 
@@ -69,6 +74,7 @@ def get_interfaces(Z_1, Z_2, x_a, x_b, device, kernel_size=2, filter=(2, 1)):
 
 def probability_histograms(ad_map, s_map_binary, binary_matrix_ecm,
                            bin_start=0.5, bin_end=1.0, bin_width=0.1, width=20):
+    """Build compact text histograms of axon, dendrite, and interface scores."""
     probs = {
         "Axonic": ad_map[:, 0].cpu().numpy(),
         "Dendritic": ad_map[:, 1].cpu().numpy(),
@@ -106,7 +112,8 @@ def overview(
     Computes ligand-receptor communication scores for all pairs, identifies
     statistically significant interactions, detects axon-dendrite interface
     regions, and prints a summary table with spatial bin counts and
-    probability histograms.
+    probability histograms. Only ligand-receptor gene maps are extracted from
+    the sparse binned matrix; the full dense gene cube is not materialized.
 
     Results are stored in ``adata.uns``:
 
@@ -149,15 +156,13 @@ def overview(
     ad.AnnData
         The input ``adata`` with results written to ``adata.uns``.
     """
-    array_usr = (adata.uns['binned_data'].toarray().reshape(adata.uns['binned_data_shape']) * adata.uns["mask_ecm"][:, :, None]).copy()
     genes = list(adata.uns['genes'])
     pairs = adata.uns['lr_pairs']
-    genes = adata.uns['genes']
     ad_map = torch.from_numpy(adata.uns['bin_probabilities'].copy()).float().to(device)
     binary_matrix_ecm = torch.from_numpy(adata.uns['mask_ecm'].copy()).float().to(device)
     binary_matrix_cell = torch.from_numpy(adata.uns['mask_cell'].copy()).float().to(device)
     binary_overlap = (binary_matrix_cell * binary_matrix_ecm).cpu().numpy()
-    x_bin, x_shape, gene_to_idx = _prep_dict(array_usr, pairs, genes, device)
+    x_bin, x_shape, gene_to_idx = prep_x_bin_from_binned(adata, pairs, genes, device)
     threshold = threshold if threshold is not None else 0.5
     ad_map[ad_map <= threshold] = 0
     ad_map[ad_map > threshold] = 1

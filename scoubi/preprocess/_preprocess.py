@@ -1,44 +1,123 @@
-import pandas as pd
-import numpy as np
 import anndata as ad
+import numpy as np
+import pandas as pd
 import scipy.sparse as sp
 import sparse
 
 
-def bin_data(adata: ad.AnnData, binsize=5, debug=False):
-    """
-    Bin transcript-level data into a spatial grid and build a 3-D gene-expression tensor.
+def get_binned_data_3d(adata: ad.AnnData) -> sparse.COO:
+    """Reconstruct the 3-D sparse binned tensor stored in ``adata.uns``.
 
-    Reads the raw transcript table via ``adata.get_transcripts()``, assigns each
-    transcript to a 2-D spatial bin, and constructs a sparse (X_BINS × Y_BINS × n_genes)
-    count array.  Binary ECM and cell masks are derived from unassigned vs. assigned
-    transcripts.  The updated transcript table (with bin columns added) is written back
-    to the sidecar Parquet.
+    The tensor is stored in AnnData as COO components rather than as a live
+    ``sparse.COO`` object so it can survive H5AD save/load round trips.
 
     Parameters
     ----------
-    adata : ad.AnnData
-        Must have ``adata.uns['transcripts_path']`` (set by :func:`scoubi.io.load_data`)
-        and a bound ``get_transcripts()`` method.  The transcript table must contain
-        columns ``x_location``, ``y_location``, ``cell_id``, and ``gene``.
-    binsize : int or float, optional
-        Physical size of each square bin in the same units as ``x_location`` /
-        ``y_location``.  Smaller values give finer resolution at higher memory cost.
-        Default: 5.
-    debug : bool, optional
-        Reserved for future use.  Default: False.
+    adata : AnnData
+        Object containing ``uns['binned_data_3d']`` with ``coords``, ``data``,
+        and ``shape`` arrays.
 
     Returns
     -------
-    ad.AnnData
-        The input ``adata`` updated in-place with:
+    sparse.COO
+        Sparse tensor with shape ``(x_bins, y_bins, n_genes)``.
+    """
+    try:
+        payload = adata.uns["binned_data_3d"]
+    except KeyError as exc:
+        raise KeyError("No 'binned_data_3d' found in adata.uns") from exc
 
-        * ``uns['binned_data']``       – CSR sparse matrix (X_BINS*Y_BINS × n_genes)
-        * ``uns['binned_data_shape']`` – ``[X_BINS, Y_BINS, n_genes]``
-        * ``uns['genes']``             – list of gene names (column order of the tensor)
-        * ``uns['mask_ecm']``          – binary (X_BINS × Y_BINS) ECM mask
-        * ``uns['mask_cell']``         – binary (X_BINS × Y_BINS) cell mask
-        * ``obsm['bin']``              – (n_cells × 2) mean binned coordinates per cell
+    required = {"coords", "data", "shape"}
+    missing = required.difference(payload)
+    if missing:
+        missing_keys = ", ".join(sorted(missing))
+        raise KeyError(f"adata.uns['binned_data_3d'] is missing: {missing_keys}")
+
+    return sparse.COO(
+        coords=np.asarray(payload["coords"]),
+        data=np.asarray(payload["data"]),
+        shape=tuple(np.asarray(payload["shape"], dtype=np.int64).tolist()),
+    )
+
+
+def get_binned_data_2d(adata: ad.AnnData) -> sp.csr_matrix:
+    """Return the flattened bin-by-gene matrix reconstructed without densifying.
+
+    Returns
+    -------
+    scipy.sparse.csr_matrix
+        Matrix with shape ``(x_bins * y_bins, n_genes)``.
+    """
+    array_3d = get_binned_data_3d(adata)
+    x_bins, y_bins, n_genes = array_3d.shape
+    array_2d = array_3d.reshape((x_bins * y_bins, n_genes))
+    return array_2d.to_scipy_sparse().tocsr()
+
+
+def _store_binned_data_3d(adata: ad.AnnData, array_3d: sparse.COO) -> None:
+    """Store COO internals using AnnData/H5AD-compatible objects."""
+    adata.uns["binned_data_3d"] = {
+        "coords": np.asarray(array_3d.coords, dtype=np.int32),
+        "data": np.asarray(array_3d.data),
+        "shape": np.asarray(array_3d.shape, dtype=np.int64),
+        "format": "sparse.COO",
+    }
+
+
+def _store_binned_data_3d_from_flat_coo(
+    adata: ad.AnnData,
+    array_2d: sp.coo_matrix,
+    y_bins: int,
+    shape_3d: tuple[int, int, int],
+) -> None:
+    """Store 3-D COO components from a flattened bin-by-gene COO matrix."""
+    adata.uns["binned_data_3d"] = {
+        "coords": np.vstack([
+            array_2d.row // y_bins,
+            array_2d.row % y_bins,
+            array_2d.col,
+        ]).astype(np.int32, copy=False),
+        "data": np.asarray(array_2d.data),
+        "shape": np.asarray(shape_3d, dtype=np.int64),
+        "format": "sparse.COO",
+    }
+
+
+def bin_data(adata: ad.AnnData, binsize=5, debug=False):
+    """
+    Bin transcript-level data into a sparse spatial gene-expression grid.
+
+    Reads the raw transcript table via ``adata.get_transcripts()``, assigns each
+    transcript to a 2-D spatial bin, and constructs sparse binned counts without
+    materializing the full ``(x_bins, y_bins, n_genes)`` dense array. The
+    flattened bin-by-gene matrix is stored in ``uns['binned_data']`` as CSR. The
+    equivalent 3-D tensor is stored in AnnData-safe COO components under
+    ``uns['binned_data_3d']``.
+
+    Parameters
+    ----------
+    adata : AnnData
+        Must have a bound ``get_transcripts()`` method returning a transcript
+        table with ``x_location``, ``y_location``, ``cell_id``, and ``gene``.
+        ``uns['usr_label']`` is used as the unassigned/extrasomatic transcript
+        label, defaulting to ``'UNASSIGNED'`` when absent.
+    binsize : int or float, optional
+        Spatial bin size in the same units as ``x_location`` and ``y_location``.
+        Default: 5.
+    debug : bool, optional
+        Reserved for compatibility. Currently unused.
+
+    Returns
+    -------
+    AnnData
+        Input object updated in-place with:
+
+        * ``uns['binned_data']`` – CSR matrix, ``x_bins * y_bins`` by genes
+        * ``uns['binned_data_3d']`` – COO ``coords``, ``data``, ``shape``
+        * ``uns['binned_data_shape']`` – ``[x_bins, y_bins, n_genes]``
+        * ``uns['genes']`` – gene order used by both binned representations
+        * ``uns['mask_ecm']`` and ``uns['mask_cell']`` – binary spatial masks
+        * ``obsm['bin']`` – mean binned coordinate per cell, aligned to obs
     """
     df = adata.get_transcripts().load()
 
@@ -54,62 +133,56 @@ def bin_data(adata: ad.AnnData, binsize=5, debug=False):
     x_bins = np.linspace(x_min, x_max, X_BINS + 1)
     y_bins = np.linspace(y_min, y_max, Y_BINS + 1)
 
-    # Assign bins
-    df["x_binned"] = np.digitize(df.x_location, x_bins) - 1
-    df["y_binned"] = np.digitize(df.y_location, y_bins) - 1
+    # Assign bins with the same semantics as np.digitize on increasing bins.
+    xs = np.searchsorted(x_bins, df.x_location.to_numpy(), side="right") - 1
+    ys = np.searchsorted(y_bins, df.y_location.to_numpy(), side="right") - 1
+    xs = np.clip(xs, 0, X_BINS - 1).astype(np.int32, copy=False)
+    ys = np.clip(ys, 0, Y_BINS - 1).astype(np.int32, copy=False)
 
-    df["x_binned"] = df["x_binned"].clip(0, X_BINS - 1)
-    df["y_binned"] = df["y_binned"].clip(0, Y_BINS - 1)
+    df["x_binned"] = xs
+    df["y_binned"] = ys
 
     # -----------------------
     # 2) Gene mapping
     # -----------------------
-    genes = np.unique(df["gene"])
-    gene_to_idx = {g: i for i, g in enumerate(genes)}
-    df["gene_idx"] = df["gene"].map(gene_to_idx)
+    gs, genes = pd.factorize(df["gene"], sort=True)
+    gs = gs.astype(np.int32, copy=False)
+    genes = np.asarray(genes)
     n_genes = len(genes)
 
     adata.uns["genes"] = list(genes)
 
     # -----------------------
-    # 3) Build sparse 3-D tensor
+    # 3) Build and store sparse 3-D tensor
     # -----------------------
-    xs = df["x_binned"].to_numpy()
-    ys = df["y_binned"].to_numpy()
-    gs = df["gene_idx"].to_numpy()
-    vals = np.ones(len(df), dtype=np.int16)
-
-    array_3d_sparse = sparse.COO(
-        coords=np.vstack([xs, ys, gs]),
-        data=vals,
-        shape=(X_BINS, Y_BINS, n_genes),
-    )
-
-    # -----------------------
-    # 4) Save in AnnData safely
-    # -----------------------
-    # Flatten to 2-D for AnnData (SciPy cannot reshape sparse 3-D)
-    binned_2d = array_3d_sparse.reshape((X_BINS * Y_BINS, n_genes)).todense()
-    binned_2d = sp.csr_matrix(binned_2d)
-    #Test THis
-    # binned_2d = array_3d_sparse.reshape((X_BINS * Y_BINS, n_genes))
-    # binned_2d = binned_2d.tocsr()
+    vals = np.ones(len(df), dtype=np.int32)
+    flat_bins = xs.astype(np.int64, copy=False) * Y_BINS + ys
+    binned_2d = sp.coo_matrix(
+        (vals, (flat_bins, gs)),
+        shape=(X_BINS * Y_BINS, n_genes),
+    ).tocsr()
+    binned_2d.sum_duplicates()
 
     adata.uns["binned_data"] = binned_2d
     adata.uns["binned_data_shape"] = [X_BINS, Y_BINS, n_genes]
+    _store_binned_data_3d_from_flat_coo(
+        adata,
+        binned_2d.tocoo(copy=False),
+        Y_BINS,
+        (X_BINS, Y_BINS, n_genes),
+    )
 
     # -----------------------
-    # 5) ECM and cell masks
+    # 4) ECM and cell masks
     # -----------------------
     binary_ecm = np.zeros((X_BINS, Y_BINS), dtype=np.int8)
     binary_cell = np.zeros((X_BINS, Y_BINS), dtype=np.int8)
 
-    usr_label = adata.uns.get('usr_label', 'UNASSIGNED')
-    ecm = df[df.cell_id == usr_label]
-    cell = df[df.cell_id != usr_label]
+    usr_label = adata.uns.get("usr_label", "UNASSIGNED")
+    is_ecm = df.cell_id.eq(usr_label).to_numpy()
 
-    binary_ecm[ecm.x_binned, ecm.y_binned] = 1
-    binary_cell[cell.x_binned, cell.y_binned] = 1
+    binary_ecm[xs[is_ecm], ys[is_ecm]] = 1
+    binary_cell[xs[~is_ecm], ys[~is_ecm]] = 1
 
     # remove ECM if cell count >= ECM count
     binary_ecm[binary_cell >= binary_ecm] = 0
@@ -118,15 +191,10 @@ def bin_data(adata: ad.AnnData, binsize=5, debug=False):
     adata.uns["mask_cell"] = binary_cell
 
     # -----------------------
-    # 6) Cell-level AnnData object
+    # 5) Cell-level binned coordinates
     # -----------------------
-    df_st = df[df.cell_id != "UNASSIGNED"]
-
-    adata_st = pd.crosstab(df_st.cell_id, df_st.gene)
-    adata_st = ad.AnnData(adata_st)
-
+    df_st = df.loc[~is_ecm, ["cell_id", "x_binned", "y_binned"]]
     cell_coords = df_st.groupby(["cell_id"])[["x_binned", "y_binned"]].mean()
-    aligned = cell_coords.reindex(adata_st.obs.index)
+    aligned = cell_coords.reindex(adata.obs.index)
     adata.obsm["bin"] = aligned.to_numpy()
-    adata.get_transcripts().save()
     return adata
