@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "scoubi"
-version = "1.0"
+version = "2.0"
 authors = [
   { name="Bhavay Aggarwal", email="baggarwal9@gatech.edu" },
 ]
@@ -44,9 +44,9 @@ dependencies = [
 ]
 
 [project.urls]
-Documentation = "https://github.com/bhavayaggarwal/SCOUBI"
-Repository = "https://github.com/bhavayaggarwal/SCOUBI"
-Issues = "https://github.com/bhavayaggarwal/SCOUBI/issues"
+Documentation = "https://github.com/bhavaygg/SCOUBI"
+Repository = "https://github.com/bhavaygg/SCOUBI"
+Issues = "https://github.com/bhavaygg/SCOUBI/issues"
 
 [tool.setuptools]
 include-package-data = true
