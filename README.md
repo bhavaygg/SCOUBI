@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="files/scoubi_transparent.png" alt="SCOUBI logo" width="720">
+  <img src="https://raw.githubusercontent.com/bhavayaggarwal/SCOUBI/main/files/scoubi_transparent.png" alt="SCOUBI logo" width="720">
 </p>
 
 # SCOUBI
@@ -88,11 +88,8 @@ adata.summarize()
 
 ## Tutorial
 
-The guided walkthrough lives in [tutorial.ipynb](tutorial.ipynb). It covers data loading, model training, spatial overview generation, enrichment analysis, interface profiling, communication analysis, and save/load workflows.
+The guided walkthrough lives in [tutorial.ipynb](https://github.com/bhavayaggarwal/SCOUBI/blob/main/tutorial.ipynb). It covers data loading, model training, spatial overview generation, enrichment analysis, interface profiling, communication analysis, and save/load workflows.
 
-## License
-
-Released under the MIT License. See [LICENSE](LICENSE).
 
 ## Citation
 
