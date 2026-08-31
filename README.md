@@ -4,7 +4,7 @@
 
 # SCOUBI
 
-SCOUBI is a computational framework for analyzing extrasomatic transcripts in imaging-based spatial transcriptomics data. Rather than discarding unassigned RNA as background, SCOUBI uses marker-gene expression of neurites and spatial ligand–receptor colocalization to classify extrasomatic regions as axon- or dendrite-enriched and to identify putative “interfaces” enriched for intercellular signaling programs. These interfaces provide a transcriptomic window into neuronal communication sites that are typically inaccessible to cell-centric spatial analyses. By preserving anatomical context, SCOUBI enables regional and molecular characterization of putative synaptic signaling environments directly from intact tissue.
+SCOUBI is a computational framework for analyzing extrasomatic transcripts in imaging-based spatial transcriptomics data. Rather than discarding unassigned RNA as background, SCOUBI uses marker-gene expression of neurites and spatial ligand–receptor colocalization to classify extrasomatic regions as axon- or dendrite-enriched and to identify putative “interfaces” enriched for intercellular signaling programs. These interfaces provide a transcriptomic window into neuronal communication sites that are typically inaccessible to cell-centric spatial analyses. SCOUBI enables regional and molecular characterization of putative synaptic signaling environments directly from intact tissue.
 
 **Preprint:** Coming soon.
 
@@ -93,4 +93,4 @@ The guided walkthrough lives in [tutorial.ipynb](https://github.com/bhavaygg/SCO
 
 ## Citation
 
-Citation information will be added when the manuscript is available.
+**Soon**
