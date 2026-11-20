@@ -93,4 +93,13 @@ The guided walkthrough lives in [tutorial.ipynb](https://github.com/bhavaygg/SCO
 
 ## Citation
 
-**Soon**
+```
+@article{aggarwal2026revealing,
+  title={Revealing the transcriptomic organization of extrasomatic interfaces using SCOUBI},
+  author={Aggarwal, Bhavay and Jain, Saumya and Sinha, Saurabh},
+  journal={bioRxiv},
+  pages={2026--11},
+  year={2026},
+  publisher={Cold Spring Harbor Laboratory}
+}
+```
